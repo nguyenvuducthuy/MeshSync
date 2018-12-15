@@ -1,6 +1,11 @@
 #include "pch.h"
 #include "msSceneGraph.h"
 #include "msMesh.h"
+#include "msMeshSerializer.h"
+
+#define vaserialize(...) VertexSerializer::getInstance().serialize(__VA_ARGS__)
+#define vadeserialize(...) VertexSerializer::getInstance().deserialize(__VA_ARGS__)
+#define vahash(...) VertexSerializer::getInstance().hash(__VA_ARGS__)
 
 namespace ms {
 
@@ -135,14 +140,14 @@ void BoneData::serialize(std::ostream & os) const
 {
     write(os, path);
     write(os, bindpose);
-    write(os, weights);
+    vaserialize(os, weights, encoding.bone_weights);
 }
 
 void BoneData::deserialize(std::istream & is)
 {
     read(is, path);
     read(is, bindpose);
-    read(is, weights);
+    vadeserialize(is, weights);
 }
 
 void BoneData::clear()
@@ -187,7 +192,14 @@ void Mesh::serialize(std::ostream& os) const
     write(os, flags);
     write(os, refine_settings);
 
-#define Body(A) write(os, A);
+    for (auto& b : bones)
+        b->encoding = encoding;
+    for (auto& b : blendshapes) {
+        for (auto& f : b->frames)
+            f->encoding = encoding;
+    }
+
+#define Body(A) vaserialize(os, A, encoding.A);
     EachVertexProperty(Body);
 #undef Body
     write(os, root_bone);
@@ -202,7 +214,7 @@ void Mesh::deserialize(std::istream& is)
     read(is, flags);
     read(is, refine_settings);
 
-#define Body(A) read(is, A);
+#define Body(A) encoding.A = vadeserialize(is, A);
     EachVertexProperty(Body);
 #undef Body
     read(is, root_bone);
@@ -238,19 +250,20 @@ void Mesh::clear()
 uint64_t Mesh::hash() const
 {
     uint64_t ret = super::hash();
-#define Body(A) ret += vhash(A);
+
+#define Body(A) ret += vahash(A, encoding.A);
     EachVertexProperty(Body);
 #undef Body
     if (flags.has_bones) {
         for(auto& b : bones)
-            ret += vhash(b->weights);
+            ret += vahash(b->weights, encoding.bone_weights);
     }
     if (flags.has_blendshape_weights) {
         for (auto& bs : blendshapes) {
             for (auto& b : bs->frames) {
-                ret += vhash(b->points);
-                ret += vhash(b->normals);
-                ret += vhash(b->tangents);
+                ret += vahash(b->points, encoding.points);
+                ret += vahash(b->normals, encoding.normals);
+                ret += vahash(b->tangents, encoding.tangents);
             }
         }
     }

@@ -6,59 +6,99 @@ namespace ms {
 
 MeshEncoding MeshEncoding::plain()
 {
-    MeshEncoding ret;
-    ret.points = VertexArrayEncoding::Plain;
-    ret.normals = VertexArrayEncoding::Plain;
-    ret.tangents = VertexArrayEncoding::Plain;
-    ret.uv = VertexArrayEncoding::Plain;
-    ret.colors = VertexArrayEncoding::Plain;
-    ret.velocities = VertexArrayEncoding::Plain;
-    ret.bone_weights = VertexArrayEncoding::Plain;
-    ret.indices = VertexArrayEncoding::Plain;
-    return ret;
+    return {};
 }
 
 MeshEncoding MeshEncoding::highp()
 {
-    return plain();
+    MeshEncoding ret{};
+    ret.points = VertexArrayEncoding::Plain;
+    ret.normals = VertexArrayEncoding::Plain;
+    ret.tangents = VertexArrayEncoding::Plain;
+    ret.uv0 = VertexArrayEncoding::Plain;
+    ret.uv1 = VertexArrayEncoding::Plain;
+    ret.colors = VertexArrayEncoding::Plain;
+    ret.velocities = VertexArrayEncoding::Plain;
+    ret.bone_weights = VertexArrayEncoding::Plain;
+    ret.indices = VertexArrayEncoding::Adaptive;
+    ret.counts = VertexArrayEncoding::Adaptive;
+    ret.material_ids = VertexArrayEncoding::Adaptive;
+    return ret;
 }
 
 MeshEncoding MeshEncoding::mediump()
 {
-    MeshEncoding ret;
+    MeshEncoding ret{};
     ret.points = VertexArrayEncoding::Plain;
     ret.normals = VertexArrayEncoding::S10x3;
     ret.tangents = VertexArrayEncoding::S10x3T;
-    ret.uv = VertexArrayEncoding::B16;
+    ret.uv0 = VertexArrayEncoding::B16;
+    ret.uv1 = VertexArrayEncoding::B16;
     ret.colors = VertexArrayEncoding::B16;
     ret.velocities = VertexArrayEncoding::B16;
     ret.bone_weights = VertexArrayEncoding::B16;
-    ret.indices = VertexArrayEncoding::Plain;
+    ret.indices = VertexArrayEncoding::Adaptive;
+    ret.counts = VertexArrayEncoding::Adaptive;
+    ret.material_ids = VertexArrayEncoding::Adaptive;
     return ret;
 }
 
 MeshEncoding MeshEncoding::lowp()
 {
-    MeshEncoding ret;
+    MeshEncoding ret{};
     ret.points = VertexArrayEncoding::B16;
     ret.normals = VertexArrayEncoding::S10x3;
     ret.tangents = VertexArrayEncoding::S10x3T;
-    ret.uv = VertexArrayEncoding::B8;
+    ret.uv0 = VertexArrayEncoding::B8;
+    ret.uv1 = VertexArrayEncoding::B8;
     ret.colors = VertexArrayEncoding::B8;
     ret.velocities = VertexArrayEncoding::B8;
     ret.bone_weights = VertexArrayEncoding::B8;
-    ret.indices = VertexArrayEncoding::Plain;
+    ret.indices = VertexArrayEncoding::Adaptive;
+    ret.counts = VertexArrayEncoding::Adaptive;
+    ret.material_ids = VertexArrayEncoding::Adaptive;
     return ret;
 }
 
 MeshEncoding::MeshEncoding()
 {
-    *this = plain();
+    points = VertexArrayEncoding::Plain;
+    normals = VertexArrayEncoding::Plain;
+    tangents = VertexArrayEncoding::Plain;
+    uv0 = VertexArrayEncoding::Plain;
+    uv1 = VertexArrayEncoding::Plain;
+    colors = VertexArrayEncoding::Plain;
+    velocities = VertexArrayEncoding::Plain;
+    bone_weights = VertexArrayEncoding::Plain;
+    indices = VertexArrayEncoding::Plain;
+    counts = VertexArrayEncoding::Plain;
+    material_ids = VertexArrayEncoding::Plain;
 }
 
+bool MeshEncoding::operator==(const MeshEncoding& v) const
+{
+    return (const uint64_t&)*this == (const uint64_t&)v;
+}
+bool MeshEncoding::operator!=(const MeshEncoding& v) const
+{
+    return (const uint64_t&)*this != (const uint64_t&)v;
+}
+uint64_t MeshEncoding::hash() const
+{
+    return (const uint64_t&)*this;
+}
+
+static_assert(sizeof(MeshEncoding) == sizeof(uint64_t), "");
 
 
-void VertexSerializer::serialize(std::ostream& os, const RawVector<float>& data, VertexArrayEncoding vae)
+
+VertexSerializer& VertexSerializer::getInstance()
+{
+    static thread_local VertexSerializer s_inst;
+    return s_inst;
+}
+
+VertexArrayEncoding VertexSerializer::serialize(std::ostream& os, const RawVector<float>& data, VertexArrayEncoding vae)
 {
     ms::write(os, vae);
     switch (vae) {
@@ -67,9 +107,9 @@ void VertexSerializer::serialize(std::ostream& os, const RawVector<float>& data,
         break;
     case VertexArrayEncoding::B8:
         ms::encode(m_u8, data);
-        ms::write(os, m_u8x2.bound_min);
-        ms::write(os, m_u8x2.bound_max);
-        ms::write(os, m_u8x2.packed);
+        ms::write(os, m_u8.bound_min);
+        ms::write(os, m_u8.bound_max);
+        ms::write(os, m_u8.packed);
         break;
     case VertexArrayEncoding::B16:
         ms::encode(m_u16, data);
@@ -78,8 +118,9 @@ void VertexSerializer::serialize(std::ostream& os, const RawVector<float>& data,
         ms::write(os, m_u16.packed);
         break;
     }
+    return vae;
 }
-void VertexSerializer::serialize(std::ostream& os, const RawVector<float2>& data, VertexArrayEncoding vae)
+VertexArrayEncoding VertexSerializer::serialize(std::ostream& os, const RawVector<float2>& data, VertexArrayEncoding vae)
 {
     ms::write(os, vae);
     switch (vae) {
@@ -99,8 +140,9 @@ void VertexSerializer::serialize(std::ostream& os, const RawVector<float2>& data
         ms::write(os, m_u16x2.packed);
         break;
     }
+    return vae;
 }
-void VertexSerializer::serialize(std::ostream& os, const RawVector<float3>& data, VertexArrayEncoding vae)
+VertexArrayEncoding VertexSerializer::serialize(std::ostream& os, const RawVector<float3>& data, VertexArrayEncoding vae)
 {
     ms::write(os, vae);
     switch (vae) {
@@ -124,8 +166,9 @@ void VertexSerializer::serialize(std::ostream& os, const RawVector<float3>& data
         ms::write(os, m_s10x3.packed);
         break;
     }
+    return vae;
 }
-void VertexSerializer::serialize(std::ostream& os, const RawVector<float4>& data, VertexArrayEncoding vae)
+VertexArrayEncoding VertexSerializer::serialize(std::ostream& os, const RawVector<float4>& data, VertexArrayEncoding vae)
 {
     ms::write(os, vae);
     switch (vae) {
@@ -149,41 +192,53 @@ void VertexSerializer::serialize(std::ostream& os, const RawVector<float4>& data
         ms::write(os, m_s10x3.packed);
         break;
     }
+    return vae;
 }
-void VertexSerializer::serialize(std::ostream& os, const RawVector<int>& data, VertexArrayEncoding& vae)
+VertexArrayEncoding VertexSerializer::serialize(std::ostream& os, const RawVector<int>& data, VertexArrayEncoding vae)
 {
-    int n, x;
-    MinMax(data.data(), data.size(), n, x);
-    int len = x - n;
-
-    if (data.empty() || len == 0) {
-        vae = VertexArrayEncoding::Constant;
-        ms::write(os, vae);
-        ms::write(os, (uint32_t)data.size());
-        if (len > 0)
-            ms::write(os, data[0]);
+    if (vae == VertexArrayEncoding::Adaptive) {
+        if (data.empty()) {
+            vae = VertexArrayEncoding::Constant;
+        }
+        else {
+            int n = 0, x = 0;
+            MinMax(data.data(), data.size(), n, x);
+            int len = x - n;
+            if (len == 0)
+                vae = VertexArrayEncoding::Constant;
+            else if (len <= 0xFF)
+                vae = VertexArrayEncoding::B8;
+            else if (len <= 0xFFFF)
+                vae = VertexArrayEncoding::B16;
+            else
+                vae = VertexArrayEncoding::Plain;
+        }
     }
-    else if (len <= 0xFF) {
-        vae = VertexArrayEncoding::B8;
-        ms::write(os, vae);
+
+    ms::write(os, vae);
+    switch (vae) {
+    case VertexArrayEncoding::Plain:
+        ms::write(os, data);
+        break;
+    case VertexArrayEncoding::Constant:
+        ms::write(os, (uint32_t)data.size());
+        if (!data.empty())
+            ms::write(os, data[0]);
+        break;
+    case VertexArrayEncoding::B8:
         ms::encode(m_u8i, data);
         ms::write(os, m_u8i.bound_min);
         ms::write(os, m_u8i.bound_max);
         ms::write(os, m_u8i.packed);
-    }
-    else if (len <= 0xFFFF) {
-        vae = VertexArrayEncoding::B16;
-        ms::write(os, vae);
+        break;
+    case VertexArrayEncoding::B16:
         ms::encode(m_u16i, data);
         ms::write(os, m_u16i.bound_min);
         ms::write(os, m_u16i.bound_max);
         ms::write(os, m_u16i.packed);
+        break;
     }
-    else {
-        vae = VertexArrayEncoding::Plain;
-        ms::write(os, vae);
-        ms::write(os, data);
-    }
+    return vae;
 }
 
 VertexArrayEncoding VertexSerializer::deserialize(std::istream& is, RawVector<float>& data)
@@ -320,6 +375,53 @@ VertexArrayEncoding VertexSerializer::deserialize(std::istream& is, RawVector<in
         break;
     }
     return vae;
+}
+
+
+uint64_t VertexSerializer::hash(const RawVector<float>& data, VertexArrayEncoding vae)
+{
+    if (vae == VertexArrayEncoding::Plain) {
+        return vhash(data);
+    }
+    else {
+        return 0;
+    }
+}
+uint64_t VertexSerializer::hash(const RawVector<float2>& data, VertexArrayEncoding vae)
+{
+    if (vae == VertexArrayEncoding::Plain) {
+        return vhash(data);
+    }
+    else {
+        return 0;
+    }
+}
+uint64_t VertexSerializer::hash(const RawVector<float3>& data, VertexArrayEncoding vae)
+{
+    if (vae == VertexArrayEncoding::Plain) {
+        return vhash(data);
+    }
+    else {
+        return 0;
+    }
+}
+uint64_t VertexSerializer::hash(const RawVector<float4>& data, VertexArrayEncoding vae)
+{
+    if (vae == VertexArrayEncoding::Plain) {
+        return vhash(data);
+    }
+    else {
+        return 0;
+    }
+}
+uint64_t VertexSerializer::hash(const RawVector<int>& data, VertexArrayEncoding vae)
+{
+    if (vae == VertexArrayEncoding::Plain) {
+        return vhash(data);
+    }
+    else {
+        return 0;
+    }
 }
 
 

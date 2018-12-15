@@ -3,52 +3,28 @@
 
 namespace ms {
 
-enum class VertexArrayEncoding : uint32_t
-{
-    Plain,
-    Constant,
-    B8,
-    B16,
-    S10x3,
-    S10x3T = S10x3,
-};
-
-struct MeshEncoding
-{
-    static const int Bits = 3;
-    VertexArrayEncoding points : Bits;
-    VertexArrayEncoding normals : Bits;
-    VertexArrayEncoding tangents : Bits;
-    VertexArrayEncoding uv : Bits;
-    VertexArrayEncoding colors : Bits;
-    VertexArrayEncoding velocities : Bits;
-    VertexArrayEncoding bone_weights : Bits;
-    VertexArrayEncoding indices : Bits;
-    VertexArrayEncoding counts : Bits;
-    VertexArrayEncoding material_ids : Bits;
-
-    static MeshEncoding plain();
-    static MeshEncoding highp();
-    static MeshEncoding mediump();
-    static MeshEncoding lowp();
-
-    MeshEncoding();
-};
-
 class VertexSerializer
 {
 public:
-    void serialize(std::ostream& os, const RawVector<float>& data, VertexArrayEncoding vae);
-    void serialize(std::ostream& os, const RawVector<float2>& data, VertexArrayEncoding vae);
-    void serialize(std::ostream& os, const RawVector<float3>& data, VertexArrayEncoding vae);
-    void serialize(std::ostream& os, const RawVector<float4>& data, VertexArrayEncoding vae);
-    void serialize(std::ostream& os, const RawVector<int>& data, VertexArrayEncoding& vae);
+    static VertexSerializer& getInstance();
+
+    VertexArrayEncoding serialize(std::ostream& os, const RawVector<float>& data, VertexArrayEncoding vae);
+    VertexArrayEncoding serialize(std::ostream& os, const RawVector<float2>& data, VertexArrayEncoding vae);
+    VertexArrayEncoding serialize(std::ostream& os, const RawVector<float3>& data, VertexArrayEncoding vae);
+    VertexArrayEncoding serialize(std::ostream& os, const RawVector<float4>& data, VertexArrayEncoding vae);
+    VertexArrayEncoding serialize(std::ostream& os, const RawVector<int>& data, VertexArrayEncoding vae);
 
     VertexArrayEncoding deserialize(std::istream& is, RawVector<float>& data);
     VertexArrayEncoding deserialize(std::istream& is, RawVector<float2>& data);
     VertexArrayEncoding deserialize(std::istream& is, RawVector<float3>& data);
     VertexArrayEncoding deserialize(std::istream& is, RawVector<float4>& data);
     VertexArrayEncoding deserialize(std::istream& is, RawVector<int>& data);
+
+    uint64_t hash(const RawVector<float>& data, VertexArrayEncoding vae);
+    uint64_t hash(const RawVector<float2>& data, VertexArrayEncoding vae);
+    uint64_t hash(const RawVector<float3>& data, VertexArrayEncoding vae);
+    uint64_t hash(const RawVector<float4>& data, VertexArrayEncoding vae);
+    uint64_t hash(const RawVector<int>& data, VertexArrayEncoding vae);
 
 private:
     BoundedArrayU8 m_u8;

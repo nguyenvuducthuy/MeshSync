@@ -68,6 +68,44 @@ struct MeshRefineSettings
     uint64_t checksum() const;
 };
 
+enum class VertexArrayEncoding : uint32_t
+{
+    Plain,
+    Constant,
+    B8,
+    B16,
+    S10x3,
+    S10x3T = S10x3,
+    Adaptive = S10x3,
+};
+
+struct MeshEncoding
+{
+    static const int Bits = 4;
+    VertexArrayEncoding points : Bits;
+    VertexArrayEncoding normals : Bits;
+    VertexArrayEncoding tangents : Bits;
+    VertexArrayEncoding uv0 : Bits;
+    VertexArrayEncoding uv1 : Bits;
+    VertexArrayEncoding colors : Bits;
+    VertexArrayEncoding velocities : Bits;
+    VertexArrayEncoding bone_weights : Bits;
+    VertexArrayEncoding indices : Bits;
+    VertexArrayEncoding counts : Bits;
+    VertexArrayEncoding material_ids : Bits;
+
+    static MeshEncoding plain();
+    static MeshEncoding highp();
+    static MeshEncoding mediump();
+    static MeshEncoding lowp();
+
+    MeshEncoding();
+    bool operator==(const MeshEncoding& v) const;
+    bool operator!=(const MeshEncoding& v) const;
+    uint64_t hash() const;
+};
+
+
 struct SubmeshData
 {
     enum class Topology
@@ -100,6 +138,7 @@ struct BlendShapeFrameData
     RawVector<float3> points;
     RawVector<float3> normals;
     RawVector<float3> tangents;
+    mutable MeshEncoding encoding;
 
 protected:
     BlendShapeFrameData();
@@ -145,6 +184,7 @@ struct BoneData
     std::string path;
     float4x4 bindpose = float4x4::identity();
     RawVector<float> weights;
+    mutable MeshEncoding encoding;
 
 protected:
     BoneData();
@@ -182,6 +222,8 @@ public:
     std::string root_bone;
     std::vector<BoneDataPtr> bones;
     std::vector<BlendShapeDataPtr> blendshapes;
+
+    mutable MeshEncoding encoding;
 
     // non-serializable
     RawVector<float3> tmp_normals;

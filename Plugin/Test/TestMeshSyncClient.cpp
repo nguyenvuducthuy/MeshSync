@@ -48,7 +48,12 @@ static void Send(ms::Scene& scene)
 TestCase(Test_SendMesh)
 {
     auto osc = ms::OpenOSceneCacheFile("wave.sc", { ms::SceneCacheEncoding::Plain });
+    auto oscm = ms::OpenOSceneCacheFile("wave_mid.sc", { ms::SceneCacheEncoding::Plain });
+    auto oscl = ms::OpenOSceneCacheFile("wave_low.sc", { ms::SceneCacheEncoding::Plain });
+
     auto oscz = ms::OpenOSceneCacheFile("wave.scz", { ms::SceneCacheEncoding::ZSTD });
+    auto osczm = ms::OpenOSceneCacheFile("wave_mid.scz", { ms::SceneCacheEncoding::ZSTD });
+    auto osczl = ms::OpenOSceneCacheFile("wave_low.scz", { ms::SceneCacheEncoding::ZSTD });
 
     for (int i = 0; i < 8; ++i) {
         auto scene = ms::Scene::create();
@@ -68,10 +73,22 @@ TestCase(Test_SendMesh)
         auto& mids = mesh->material_ids;
 
         GenerateWaveMesh(counts, indices, points, uv, 2.0f, 1.0f, 32, 30.0f * mu::Deg2Rad * i);
+
         mids.resize(counts.size(), 0);
 
-        osc->addScene(scene, 0.5f * i);
-        oscz->addScene(scene, 0.5f * i);
+        osc->addScene(scene, 0.5f * i); osc->flush();
+        oscz->addScene(scene, 0.5f * i); oscz->flush();
+
+        mesh->encoding = ms::MeshEncoding::mediump();
+        oscm->addScene(scene, 0.5f * i); oscm->flush();
+        osczm->addScene(scene, 0.5f * i); osczm->flush();
+
+        mesh->encoding = ms::MeshEncoding::lowp();
+        oscl->addScene(scene, 0.5f * i); oscl->flush();
+        osczl->addScene(scene, 0.5f * i); osczl->flush();
+
+        mesh->encoding = ms::MeshEncoding::plain();
+
         Send(*scene);
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -79,7 +96,7 @@ TestCase(Test_SendMesh)
 
 TestCase(Test_SceneCacheRead)
 {
-    auto isc = ms::OpenISceneCacheFile("wave.scz");
+    auto isc = ms::OpenISceneCacheFile("wave_low.scz");
     Expect(isc);
     if (!isc)
         return;
