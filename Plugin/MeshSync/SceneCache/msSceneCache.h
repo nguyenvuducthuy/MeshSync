@@ -42,8 +42,8 @@ public:
 msDeclPtr(ISceneCache);
 
 
-OSceneCachePtr OpenOSceneCacheFile(const char *path, const SceneCacheSettings& settings = SceneCacheSettings());
-OSceneCache* OpenOSceneCacheFileRaw(const char *path, const SceneCacheSettings& settings = SceneCacheSettings());
+OSceneCachePtr OpenOSceneCacheFile(const char *path, const SceneCacheSettings& settings = {});
+OSceneCache* OpenOSceneCacheFileRaw(const char *path, const SceneCacheSettings& settings = {});
 
 ISceneCachePtr OpenISceneCacheFile(const char *path);
 ISceneCache* OpenISceneCacheFileRaw(const char *path);

@@ -11,6 +11,8 @@ static BufferEncoderPtr CreateEncoder(SceneCacheEncoding encoding)
     case SceneCacheEncoding::ZSTD: ret = CreateZSTDEncoder(); break;
     default: break;
     }
+    if (!ret)
+        ret = CreatePlainEncoder();
     return ret;
 }
 
@@ -66,10 +68,6 @@ bool OSceneCacheImpl::prepare(ostream_ptr ost, const SceneCacheSettings& setting
         return false;
 
     m_encoder = CreateEncoder(m_settings.encoding);
-    if (!m_encoder) {
-        m_settings.encoding = SceneCacheEncoding::Plain;
-        m_encoder = CreatePlainEncoder();
-    }
 
     CacheFileHeader header;
     header.settings = m_settings;
@@ -148,10 +146,6 @@ bool ISceneCacheImpl::prepare(istream_ptr ist)
         return false;
 
     m_encoder = CreateEncoder(m_settings.encoding);
-    if (!m_encoder) {
-        // encoder associated with m_settings.encoding is not available
-        return false;
-    }
 
     for (;;) {
         CacheFileSceneHeader sh;
