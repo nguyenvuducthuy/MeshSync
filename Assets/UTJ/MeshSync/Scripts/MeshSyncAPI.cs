@@ -21,7 +21,7 @@ namespace UTJ.MeshSync
 
         public static string SanitizeFileName(string name)
         {
-            var reg = new Regex("[:<>|\\*\\?]");
+            var reg = new Regex("[:<>|\\*\\?\\\\]");
             return reg.Replace(name, "_");
         }
 

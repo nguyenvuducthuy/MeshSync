@@ -16,7 +16,7 @@ struct CacheFileSceneHeader
     uint64_t size = 0;
     float time = 0.0f;
 
-    static CacheFileSceneHeader terminator() { return CacheFileSceneHeader(); }
+    static CacheFileSceneHeader terminator() { return {}; }
 };
 
 
