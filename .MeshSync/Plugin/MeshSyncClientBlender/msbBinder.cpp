@@ -240,7 +240,7 @@ struct param_holder5
 
 
 template<typename T, typename R>
-R call(T *self, FunctionRNA *f)
+static inline R call(T *self, FunctionRNA *f)
 {
     PointerRNA ptr;
     ptr.data = self;
@@ -253,7 +253,7 @@ R call(T *self, FunctionRNA *f)
     return params.get();
 }
 template<typename T, typename R, typename A1>
-R call(T *self, FunctionRNA *f, const A1& a1)
+static inline R call(T *self, FunctionRNA *f, const A1& a1)
 {
     PointerRNA ptr;
     ptr.data = self;
@@ -266,7 +266,7 @@ R call(T *self, FunctionRNA *f, const A1& a1)
     return params.get();
 }
 template<typename T, typename R, typename A1, typename A2>
-R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2)
+static inline R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2)
 {
     PointerRNA ptr;
     ptr.data = self;
@@ -279,7 +279,7 @@ R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2)
     return params.get();
 }
 template<typename T, typename R, typename A1, typename A2, typename A3>
-R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3)
+static inline R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3)
 {
     PointerRNA ptr;
     ptr.data = self;
@@ -292,7 +292,7 @@ R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3)
     return params.get();
 }
 template<typename T, typename R, typename A1, typename A2, typename A3, typename A4>
-R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3, const A4& a4)
+static inline R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3, const A4& a4)
 {
     PointerRNA ptr;
     ptr.data = self;
@@ -305,7 +305,7 @@ R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3, const 
     return params.get();
 }
 template<typename T, typename R, typename A1, typename A2, typename A3, typename A4, typename A5>
-R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5)
+static inline R call(T *self, FunctionRNA *f, const A1& a1, const A2& a2, const A3& a3, const A4& a4, const A5& a5)
 {
     PointerRNA ptr;
     ptr.data = self;
