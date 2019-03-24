@@ -1,17 +1,34 @@
 #include "pch.h"
 #include "msmqUtils.h"
 
-std::string BuildPath(MQDocument doc, MQObject obj)
+std::string GetName(MQObject obj)
+{
+    char name[MaxNameBuffer];
+    obj->GetName(name, sizeof(name));
+    return ms::ToUTF8(name);
+}
+
+std::string GetName(MQMaterial obj)
+{
+    char name[MaxNameBuffer];
+    obj->GetName(name, sizeof(name));
+    return ms::ToUTF8(name);
+}
+
+static std::string GetPathImpl(MQDocument doc, MQObject obj)
 {
     std::string ret;
-    if (auto parent = doc->GetParentObject(obj)) {
-        ret += BuildPath(doc, parent);
-    }
+    if (auto parent = doc->GetParentObject(obj))
+        ret += GetPathImpl(doc, parent);
     char name[MaxNameBuffer];
     obj->GetName(name, sizeof(name));
     ret += "/";
     ret += name;
     return ret;
+}
+std::string GetPath(MQDocument doc, MQObject obj)
+{
+    return ms::ToUTF8(GetPathImpl(doc, obj));
 }
 
 bool ExtractID(const char *name, int& id)

@@ -40,6 +40,15 @@ struct DAGNode : public mu::noncopyable
 };
 using DAGNodeMap = std::map<MObjectKey, DAGNode>;
 
+struct TransformData
+{
+    mu::float3 translation = mu::float3::zero();
+    mu::float3 pivot = mu::float3::zero();
+    mu::float3 pivot_offset = mu::float3::zero();
+    mu::quatf rotation = mu::quatf::identity();
+    mu::float3 scale = mu::float3::zero();
+};
+
 struct TreeNode : public mu::noncopyable
 {
     DAGNode *trans = nullptr;
@@ -53,13 +62,15 @@ struct TreeNode : public mu::noncopyable
 
     ms::TransformPtr dst_obj;
     ms::AnimationPtr dst_anim;
+    TransformData transform_data;
+    ms::float4x4 model_transform;
 
     ms::Identifier getIdentifier() const;
     void clearState();
     bool isInstance() const;
     TreeNode* getPrimaryInstanceNode() const;
 
-    MDagPath getDagPath() const;
+    MDagPath getDagPath(bool include_shape = true) const;
     void getDagPath_(MDagPath& dst) const;
     MObject getTrans() const;
     MObject getShape() const;
@@ -98,6 +109,7 @@ public:
         bool remove_namespace = true;
         bool reduce_keyframes = true;
         bool multithreaded = false;
+        bool fbx_compatible_transform = true;
 
         // import settings
         bool bake_skin = false;
@@ -187,6 +199,11 @@ private:
     void doExtractMeshDataImpl(ms::Mesh& dst, MFnMesh &mmesh, MFnMesh &mshape);
     void doExtractMeshData(ms::Mesh& dst, TreeNode *n);
     void doExtractMeshDataBaked(ms::Mesh& dst, TreeNode *n);
+
+    void extractTransformData(TreeNode *n, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis);
+    void extractCameraData(TreeNode *n, bool& ortho, float& near_plane, float& far_plane, float& fov,
+        float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance);
+    void extractLightData(TreeNode *n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& spot_angle);
 
     int exportAnimations(SendScope scope);
     bool exportAnimation(TreeNode *tn, bool force);

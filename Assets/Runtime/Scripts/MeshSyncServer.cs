@@ -6,6 +6,10 @@ using UnityEngine;
 #if UNITY_2017_1_OR_NEWER
 using UnityEngine.Animations;
 #endif
+#if UNITY_2019_1_OR_NEWER
+using Unity.Collections;
+#endif
+
 #if UNITY_EDITOR
 using UnityEditor;
 #endif
@@ -161,7 +165,7 @@ namespace UTJ.MeshSync
 
         #region Fields
         [SerializeField] int m_serverPort = 8080;
-        [SerializeField] string m_assetDir = "MeshSyncAssets";
+        [SerializeField] DataPath m_assetDir = new DataPath(DataPath.Root.DataPath, "MeshSyncAssets");
         [SerializeField] Transform m_rootObject;
         [Space(10)]
         [SerializeField] bool m_syncVisibility = true;
@@ -210,14 +214,14 @@ namespace UTJ.MeshSync
             get { return m_serverPort; }
             set { m_serverPort = value; }
         }
-        public string assetDir
+        public DataPath assetDir
         {
             get { return m_assetDir; }
             set { m_assetDir = value; }
         }
         public string assetPath
         {
-            get { return "Assets/" + m_assetDir; }
+            get { return "Assets/" + m_assetDir.leaf; }
         }
         public string httpFileRootPath
         {
@@ -640,8 +644,7 @@ namespace UTJ.MeshSync
         {
 #if UNITY_EDITOR
             Try(()=> {
-                if (!AssetDatabase.IsValidFolder(assetPath))
-                    AssetDatabase.CreateFolder("Assets", m_assetDir);
+                m_assetDir.CreateDirectory();
             });
 #endif
         }
@@ -1039,11 +1042,16 @@ namespace UTJ.MeshSync
             if (m_findMaterialFromAssets && (dst.material == null || dst.name != materialName))
             {
                 var guids = AssetDatabase.FindAssets("t:Material " + materialName);
-                if (guids.Length > 0)
+                foreach (var guid in guids)
                 {
-                    dst.material = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guids[0]));
-                    dst.materialIID = 0; // ignore material params
-                    m_needReassignMaterials = true;
+                    var material = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guid));
+                    if (material.name == materialName)
+                    {
+                        dst.material = material;
+                        dst.materialIID = 0; // ignore material params
+                        m_needReassignMaterials = true;
+                        break;
+                    }
                 }
             }
 #endif
@@ -1373,14 +1381,24 @@ namespace UTJ.MeshSync
             }
             if (flags.hasBones)
             {
-                var tmpW = new PinnedList<BoneWeight>();
-                tmpW.Resize(split.numPoints);
-                data.ReadBoneWeights(tmpW, split);
                 mesh.bindposes = data.bindposes;
-                mesh.boneWeights = tmpW.Array;
-                tmpW.Dispose();
+#if UNITY_2019_1_OR_NEWER
+                var bonesPerVertex = new NativeArray<byte>(split.numPoints, Allocator.Temp);
+                var weights = new NativeArray<BoneWeight1>(split.numBoneWeights, Allocator.Temp);
+                data.ReadBoneCounts(Misc.ForceGetPointer(ref bonesPerVertex), split);
+                data.ReadBoneWeightsV(Misc.ForceGetPointer(ref weights), split);
+                mesh.SetBoneWeights(bonesPerVertex, weights);
+                bonesPerVertex.Dispose();
+                weights.Dispose();
+#else
+                var tmpWeights4 = new PinnedList<BoneWeight>();
+                tmpWeights4.Resize(split.numPoints);
+                data.ReadBoneWeights4(tmpWeights4, split);
+                mesh.boneWeights = tmpWeights4.Array;
+                tmpWeights4.Dispose();
+#endif
             }
-            if(flags.hasIndices)
+            if (flags.hasIndices)
             {
                 mesh.subMeshCount = split.numSubmeshes;
                 for (int smi = 0; smi < mesh.subMeshCount; ++smi)
@@ -1986,11 +2004,39 @@ namespace UTJ.MeshSync
             {
                 CaptureMesh(ref dst, mesh, null, mes.flags, smr.sharedMaterials);
 
+                // bones
                 if (mes.flags.getBones)
                 {
                     dst.SetBonePaths(this, smr.bones);
                     dst.bindposes = mesh.bindposes;
-                    dst.WriteWeights(mesh.boneWeights);
+
+#if UNITY_2019_1_OR_NEWER
+                    var bonesPerVertex = mesh.GetBonesPerVertex();
+                    var weights = mesh.GetAllBoneWeights();
+                    dst.WriteBoneWeightsV(ref bonesPerVertex, ref weights);
+#else
+                    dst.WriteBoneWeights4(mesh.boneWeights);
+#endif
+                }
+
+                // blendshapes
+                if (mes.flags.getBlendShapes && mesh.blendShapeCount > 0)
+                {
+                    var v = new Vector3[mesh.vertexCount];
+                    var n = new Vector3[mesh.vertexCount];
+                    var t = new Vector3[mesh.vertexCount];
+                    for (int bi = 0; bi < mesh.blendShapeCount; ++bi)
+                    {
+                        var bd = dst.AddBlendShape(mesh.GetBlendShapeName(bi));
+                        bd.weight = smr.GetBlendShapeWeight(bi);
+                        int frameCount = mesh.GetBlendShapeFrameCount(bi);
+                        for (int fi = 0; fi < frameCount; ++fi)
+                        {
+                            mesh.GetBlendShapeFrameVertices(bi, fi, v, n, t);
+                            float w = mesh.GetBlendShapeFrameWeight(bi, fi);
+                            bd.AddFrame(w, v, n, t);
+                        }
+                    }
                 }
             }
             return true;
@@ -1998,31 +2044,18 @@ namespace UTJ.MeshSync
 
         void CaptureMesh(ref MeshData data, Mesh mesh, Cloth cloth, GetFlags flags, Material[] materials)
         {
-            // todo: cloth?
             if (flags.getPoints)
-            {
                 data.WritePoints(mesh.vertices);
-            }
             if (flags.getNormals)
-            {
                 data.WriteNormals(mesh.normals);
-            }
             if (flags.getTangents)
-            {
                 data.WriteTangents(mesh.tangents);
-            }
             if (flags.getUV0)
-            {
                 data.WriteUV0(mesh.uv);
-            }
             if (flags.getUV1)
-            {
                 data.WriteUV1(mesh.uv2);
-            }
             if (flags.getColors)
-            {
                 data.WriteColors(mesh.colors);
-            }
             if (flags.getIndices)
             {
                 if (!flags.getMaterialIDs || materials == null || materials.Length == 0)
@@ -2040,28 +2073,8 @@ namespace UTJ.MeshSync
                     }
                 }
             }
-            if (flags.getBones)
-            {
-                data.WriteWeights(mesh.boneWeights);
-                data.bindposes = mesh.bindposes;
-            }
-            if (flags.getBlendShapes && mesh.blendShapeCount > 0)
-            {
-                var v = new Vector3[mesh.vertexCount];
-                var n = new Vector3[mesh.vertexCount];
-                var t = new Vector3[mesh.vertexCount];
-                for (int bi = 0; bi < mesh.blendShapeCount; ++bi)
-                {
-                    var bd = data.AddBlendShape(mesh.GetBlendShapeName(bi));
-                    int frameCount = mesh.GetBlendShapeFrameCount(bi);
-                    for (int fi = 0; fi < frameCount; ++fi)
-                    {
-                        mesh.GetBlendShapeFrameVertices(bi, fi, v, n, t);
-                        float w = mesh.GetBlendShapeFrameWeight(bi, fi);
-                        bd.AddFrame(w, v, n, t);
-                    }
-                }
-            }
+
+            // bones & blendshapes are handled by CaptureSkinnedMeshRenderer()
         }
         #endregion
 

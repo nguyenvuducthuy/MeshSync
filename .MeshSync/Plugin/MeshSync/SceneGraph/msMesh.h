@@ -60,7 +60,7 @@ struct MeshRefineSettings
     float scale_factor = 1.0f;
     float smooth_angle = 0.0f; // in degree
     uint32_t split_unit = 65000;
-    uint32_t max_bones_par_vertices = 4;
+    uint32_t max_bone_influence = 4;
     float4x4 local2world = float4x4::identity();
     float4x4 world2local = float4x4::identity();
     float4x4 mirror_basis = float4x4::identity();
@@ -127,6 +127,8 @@ struct SplitData
     int index_offset = 0;
     int vertex_count = 0;
     int vertex_offset = 0;
+    int bone_weight_count = 0;
+    int bone_weight_offset = 0;
     IArray<SubmeshData> submeshes;
     float3 bound_center = float3::zero();
     float3 bound_size = float3::zero();
@@ -134,7 +136,7 @@ struct SplitData
 
 struct BlendShapeFrameData
 {
-    float weight = 0.0f;
+    float weight = 0.0f; // 0.0f - 100.0f
     RawVector<float3> points;
     RawVector<float3> normals;
     RawVector<float3> tangents;
@@ -159,7 +161,7 @@ msDeclPtr(BlendShapeFrameData);
 struct BlendShapeData
 {
     std::string name;
-    float weight = 0.0f;
+    float weight = 0.0f; // 0.0f - 100.0f
     std::vector<BlendShapeFrameDataPtr> frames;
 
 protected:
@@ -225,15 +227,12 @@ public:
 
     mutable MeshEncoding encoding;
 
-    // non-serializable
-    RawVector<float3> tmp_normals;
-    RawVector<float2> tmp_uv0, tmp_uv1;
-    RawVector<float4> tmp_colors;
-    RawVector<float3> tmp_velocities;
-    RawVector<int> remap_normals, remap_uv0, remap_uv1, remap_colors;
-    RawVector<Weights4> tmp_weights4;
 
+    // non-serializable fields
     RawVector<Weights4> weights4;
+    RawVector<uint8_t> bone_counts;
+    RawVector<int> bone_offsets;
+    RawVector<Weights1> weights1;
     std::vector<SubmeshData> submeshes;
     std::vector<SplitData> splits;
 
@@ -261,7 +260,8 @@ public:
     void applyMirror(const float3& plane_n, float plane_d, bool welding = false);
     void applyTransform(const float4x4& t);
 
-    void setupBoneData();
+    void setupBoneWeights4();
+    void setupBoneWeightsVariable();
     void setupFlags();
 
     void convertHandedness_Mesh(bool x, bool yz);

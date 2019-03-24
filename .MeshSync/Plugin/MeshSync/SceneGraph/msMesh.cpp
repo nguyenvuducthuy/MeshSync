@@ -19,7 +19,7 @@ uint64_t MeshRefineSettings::checksum() const
     ret += csum(scale_factor);
     ret += csum(smooth_angle);
     ret += csum(split_unit);
-    ret += csum(max_bones_par_vertices);
+    ret += csum(max_bone_influence);
     ret += csum(local2world);
     ret += csum(world2local);
     ret += csum(mirror_basis);
@@ -176,10 +176,6 @@ void BoneData::applyScaleFactor(float scale)
 #define EachVertexProperty(Body)\
     Body(points) Body(normals) Body(tangents) Body(uv0) Body(uv1) Body(colors) Body(velocities) Body(counts) Body(indices) Body(material_ids)
 
-#define EachTmpProperty(Body)\
-    Body(tmp_normals) Body(tmp_uv0) Body(tmp_uv1) Body(tmp_colors) Body(tmp_velocities)\
-     Body(remap_normals) Body(remap_uv0) Body(remap_uv1) Body(remap_colors) Body(tmp_weights4)
-
 Mesh::Mesh() {}
 Mesh::~Mesh() {}
 Entity::Type Mesh::getType() const { return Type::Mesh; }
@@ -235,7 +231,6 @@ void Mesh::clear()
 
 #define Body(A) vclear(A);
     EachVertexProperty(Body);
-    EachTmpProperty(Body);
 #undef Body
     vclear(weights4);
 
@@ -300,7 +295,6 @@ uint64_t Mesh::checksumGeom() const
     return ret;
 }
 
-#undef EachTmpProperty
 #undef EachVertexProperty
 
 static inline float4 lerp_tangent(float4 a, float4 b, float w)
@@ -440,8 +434,11 @@ void Mesh::refine(const MeshRefineSettings& mrs)
     if (mrs.flags.swap_handedness || mrs.flags.swap_yz) {
         convertHandedness(mrs.flags.swap_handedness, mrs.flags.swap_yz);
     }
-    if (weights4.empty() && !bones.empty()) {
-        setupBoneData();
+    if (!bones.empty()) {
+        if (mrs.max_bone_influence == 4)
+            setupBoneWeights4();
+        else if (mrs.max_bone_influence == -1)
+            setupBoneWeightsVariable();
     }
 
     // normals
@@ -458,6 +455,14 @@ void Mesh::refine(const MeshRefineSettings& mrs)
     if (mrs.flags.make_double_sided) {
         makeDoubleSided();
     }
+
+    size_t num_indices_old = indices.size();
+    size_t num_points_old = points.size();
+
+    RawVector<float3> tmp_normals;
+    RawVector<float2> tmp_uv0, tmp_uv1;
+    RawVector<float4> tmp_colors;
+    RawVector<int> remap_normals, remap_uv0, remap_uv1, remap_colors;
 
     mu::MeshRefiner refiner;
     refiner.split_unit = mrs.split_unit;
@@ -481,6 +486,7 @@ void Mesh::refine(const MeshRefineSettings& mrs)
         refiner.retopology(mrs.flags.swap_faces);
         refiner.genSubmeshes(material_ids);
 
+        // remap vertex attributes
         refiner.new_points.swap(points);
         refiner.new_counts.swap(counts);
         refiner.new_indices_submeshes.swap(indices);
@@ -501,6 +507,7 @@ void Mesh::refine(const MeshRefineSettings& mrs)
             tmp_colors.swap(colors);
         }
 
+        // setup splits
         splits.clear();
         int offset_indices = 0;
         int offset_vertices = 0;
@@ -559,16 +566,56 @@ void Mesh::refine(const MeshRefineSettings& mrs)
 
     // velocities
     if (!velocities.empty()) {
-        tmp_velocities.resize_discard(points.size());
-        CopyWithIndices(tmp_velocities.data(), velocities.data(), refiner.new2old_points);
+        RawVector<float3> tmp_velocities;
+        Remap(tmp_velocities, velocities, refiner.new2old_points);
         tmp_velocities.swap(velocities);
     }
 
-    // weights
+    // bone weights
     if (!weights4.empty()) {
-        tmp_weights4.resize_discard(points.size());
-        CopyWithIndices(tmp_weights4.data(), weights4.data(), refiner.new2old_points);
-        weights4.swap(tmp_weights4);
+        RawVector<Weights4> tmp_weights;
+        Remap(tmp_weights, weights4, refiner.new2old_points);
+        weights4.swap(tmp_weights);
+    }
+    if (!weights1.empty() && !bone_counts.empty() && !bone_offsets.empty()) {
+        RawVector<uint8_t> tmp_bone_counts;
+        RawVector<int> tmp_bone_offsets;
+        RawVector<Weights1> tmp_weights;
+
+        Remap(tmp_bone_counts, bone_counts, refiner.new2old_points);
+
+        size_t num_points = points.size();
+        tmp_bone_offsets.resize_discard(num_points);
+
+        // calculate offsets
+        int offset = 0;
+        for (size_t i = 0; i < num_points; ++i) {
+            tmp_bone_offsets[i] = offset;
+            offset += tmp_bone_counts[i];
+        }
+        tmp_weights.resize_discard(offset);
+
+        // remap weights
+        for (size_t i = 0; i < num_points; ++i) {
+            int new_offset = tmp_bone_offsets[i];
+            int old_offset = bone_offsets[refiner.new2old_points[i]];
+            weights1[old_offset].copy_to(&tmp_weights[new_offset], tmp_bone_counts[i]);
+        }
+
+        bone_counts.swap(tmp_bone_counts);
+        bone_offsets.swap(tmp_bone_offsets);
+        weights1.swap(tmp_weights);
+
+        // setup splits
+        int weight_offset = 0;
+        for (auto& split : splits) {
+            split.bone_weight_offset = weight_offset;
+            int bone_count = 0;
+            for (int vi = 0; vi < split.vertex_count; ++vi)
+                bone_count += bone_counts[split.vertex_offset + vi];
+            split.bone_weight_count = bone_count;
+            weight_offset += bone_count;
+        }
     }
 
     if (!blendshapes.empty()) {
@@ -577,19 +624,22 @@ void Mesh::refine(const MeshRefineSettings& mrs)
             bs->sort();
             for (auto& fp : bs->frames) {
                 auto& f = *fp;
-                if (!f.points.empty()) {
-                    tmp.resize_discard(points.size());
-                    CopyWithIndices(tmp.data(), f.points.data(), refiner.new2old_points);
+                if (f.points.size() == num_points_old) {
+                    Remap(tmp, f.points, refiner.new2old_points);
                     f.points.swap(tmp);
                 }
-                if (!f.normals.empty()) {
-                    tmp.resize_discard(points.size());
-                    CopyWithIndices(tmp.data(), f.normals.data(), refiner.new2old_points);
+
+                if (f.normals.size() == num_points_old) {
+                    Remap(tmp, f.normals, refiner.new2old_points);
                     f.normals.swap(tmp);
                 }
-                if (!f.tangents.empty()) {
-                    tmp.resize_discard(points.size());
-                    CopyWithIndices(tmp.data(), f.tangents.data(), refiner.new2old_points);
+                else if (f.normals.size() == num_indices_old) {
+                    Remap(tmp, f.normals, remap_normals);
+                    f.normals.swap(tmp);
+                }
+
+                if (f.tangents.size() == num_points_old) {
+                    Remap(tmp, f.tangents, refiner.new2old_points);
                     f.tangents.swap(tmp);
                 }
             }
@@ -682,8 +732,7 @@ void Mesh::makeDoubleSided()
             return false;
 
         std::remove_reference_t<decltype(attr)> tmp;
-        tmp.resize_discard(num_indices);
-        CopyWithIndices(tmp.data(), attr.data(), { indices.data(), num_indices });
+        Remap(tmp, attr, indices);
         attr.swap(tmp);
         return true;
     };
@@ -721,8 +770,7 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
         // welding
         int idx = 0;
         for (size_t pi = 0; pi < num_points_old; ++pi) {
-            auto& p = points[pi];
-            float d = dot(plane_n, p) - plane_d;
+            float d = plane_distance(points[pi], plane_n, plane_d);
             if (near_equal(d, 0.0f)) {
                 indirect[pi] = (int)pi;
             }
@@ -730,15 +778,18 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
                 copylist.push_back((int)pi);
                 indirect[pi] = (int)num_points_old + idx++;
             }
-
         }
     }
+
+    size_t num_additional_points = copylist.size();
+    size_t num_additional_indices = num_indices_old;
 
     // points
     if (refine_settings.flags.mirror_basis)
         mu::MulPoints(refine_settings.mirror_basis, points.data(), points.data(), points.size());
-    points.resize(num_points_old + copylist.size());
-    mu::MirrorPoints(points.data() + num_points_old, IArray<float3>{points.data(), num_points_old}, copylist, plane_n, plane_d);
+    points.resize(num_points_old + num_additional_points);
+    mu::CopyWithIndices(&points[num_points_old], &points[0], copylist);
+    mu::MirrorPoints(&points[num_points_old], num_additional_points, plane_n, plane_d);
     if (refine_settings.flags.mirror_basis)
         mu::MulPoints(mu::invert(refine_settings.mirror_basis), points.data(), points.data(), points.size());
 
@@ -753,6 +804,7 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
         if (normals.size() == num_points_old) {
             normals.resize(points.size());
             mu::CopyWithIndices(&normals[num_points_old], &normals[0], copylist);
+            mu::MirrorVectors(&normals[num_points_old], num_additional_points, plane_n);
         }
         else if (normals.size() == num_indices_old) {
             normals.resize(indices.size());
@@ -760,6 +812,24 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
             mu::EnumerateReverseFaceIndices(IArray<int>{counts.data(), num_faces_old}, [dst, this](int, int idx, int ridx) {
                 dst[idx] = normals[ridx];
             });
+            mu::MirrorVectors(&normals[num_indices_old], num_additional_indices, plane_n);
+        }
+    }
+
+    // tangents
+    if (!tangents.empty()) {
+        if (tangents.size() == num_points_old) {
+            tangents.resize(points.size());
+            mu::CopyWithIndices(&tangents[num_points_old], &tangents[0], copylist);
+            mu::MirrorVectors(&tangents[num_points_old], num_additional_points, plane_n);
+        }
+        else if (tangents.size() == num_indices_old) {
+            tangents.resize(indices.size());
+            auto dst = &tangents[num_indices_old];
+            mu::EnumerateReverseFaceIndices(IArray<int>{counts.data(), num_faces_old}, [dst, this](int, int idx, int ridx) {
+                dst[idx] = tangents[ridx];
+            });
+            mu::MirrorVectors(&tangents[num_indices_old], num_additional_indices, plane_n);
         }
     }
 
@@ -811,6 +881,7 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
         if (velocities.size() == num_points_old) {
             velocities.resize(points.size());
             mu::CopyWithIndices(&velocities[num_points_old], &velocities[0], copylist);
+            mu::MirrorVectors(&velocities[num_points_old], num_additional_points, plane_n);
         }
     }
 
@@ -835,14 +906,35 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
             if (!f.points.empty()) {
                 f.points.resize(points.size());
                 mu::CopyWithIndices(&f.points[num_points_old], &f.points[0], copylist);
+                mu::MirrorVectors(&f.points[num_points_old], num_additional_points, plane_n);
             }
-            if (!f.normals.empty()) {
+
+            if (f.normals.size() == num_points_old) {
                 f.normals.resize(points.size());
                 mu::CopyWithIndices(&f.normals[num_points_old], &f.normals[0], copylist);
+                mu::MirrorVectors(&f.normals[num_points_old], num_additional_points, plane_n);
             }
-            if (!f.tangents.empty()) {
+            else if (f.normals.size() == num_indices_old) {
+                f.normals.resize(indices.size());
+                auto dst = &f.normals[num_indices_old];
+                mu::EnumerateReverseFaceIndices(IArray<int>{counts.data(), num_faces_old}, [dst, &f, this](int, int idx, int ridx) {
+                    dst[idx] = f.normals[ridx];
+                });
+                mu::MirrorVectors(&f.normals[num_indices_old], num_additional_indices, plane_n);
+            }
+
+            if (!f.tangents.size() == num_points_old) {
                 f.tangents.resize(points.size());
                 mu::CopyWithIndices(&f.tangents[num_points_old], &f.tangents[0], copylist);
+                mu::MirrorVectors(&f.tangents[num_points_old], num_additional_points, plane_n);
+            }
+            else if (f.normals.size() == num_indices_old) {
+                f.tangents.resize(indices.size());
+                auto dst = &f.tangents[num_indices_old];
+                mu::EnumerateReverseFaceIndices(IArray<int>{counts.data(), num_faces_old}, [dst, &f, this](int, int idx, int ridx) {
+                    dst[idx] = f.tangents[ridx];
+                });
+                mu::MirrorVectors(&f.tangents[num_indices_old], num_additional_indices, plane_n);
             }
         }
     }
@@ -850,13 +942,15 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
 
 void Mesh::applyTransform(const float4x4& m)
 {
+    if (mu::near_equal(m, float4x4::identity()))
+        return;
     mu::MulPoints(m, points.data(), points.data(), points.size());
     mu::MulVectors(m, normals.data(), normals.data(), normals.size());
     mu::Normalize(normals.data(), normals.size());
     mu::MulVectors(m, velocities.data(), velocities.data(), velocities.size());
 }
 
-void Mesh::setupBoneData()
+void Mesh::setupBoneWeights4()
 {
     if (bones.empty())
         return;
@@ -894,20 +988,14 @@ void Mesh::setupBoneData()
         }
     }
     else {
-        struct IW
-        {
-            int index;
-            float weight;
-        };
-
-        auto *tmp = (IW*)alloca(sizeof(IW) * num_bones);
+        auto *tmp = (Weights1*)alloca(sizeof(Weights1) * num_bones);
         for (int vi = 0; vi < num_vertices; ++vi) {
             for (int bi = 0; bi < num_bones; ++bi) {
                 tmp[bi].index = bi;
                 tmp[bi].weight = bones[bi]->weights[vi];
             }
             std::nth_element(tmp, tmp + 4, tmp + num_bones,
-                [&](const IW& a, const IW& b) { return a.weight > b.weight; });
+                [&](const Weights1& a, const Weights1& b) { return a.weight > b.weight; });
 
             auto& w4 = weights4[vi];
             for (int bi = 0; bi < 4; ++bi) {
@@ -916,6 +1004,81 @@ void Mesh::setupBoneData()
             }
             if (w4.normalize() == 0.0f)
                 search_weight(vi);
+        }
+    }
+}
+
+void Mesh::setupBoneWeightsVariable()
+{
+    if (bones.empty())
+        return;
+
+    int num_bones = (int)bones.size();
+    int num_vertices = (int)points.size();
+    bone_offsets.resize_discard(num_vertices);
+    bone_counts.resize_discard(num_vertices);
+
+    // count bone influence and offset
+    int offset = 0;
+    for (int vi = 0; vi < num_vertices; ++vi) {
+        int num_influence = 0;
+        for (int bi = 0; bi < num_bones; ++bi) {
+            float weight = bones[bi]->weights[vi];
+            if (weight > 0.0f) {
+                ++num_influence;
+                if (num_influence == 255)
+                    break;
+            }
+        }
+        bone_offsets[vi] = offset;
+        bone_counts[vi] = (uint8_t)num_influence;
+        offset += num_influence;
+    }
+    weights1.resize_zeroclear(offset);
+
+    auto search_weight = [this](int vi) {
+        // some DCC tools (mainly MotionBuilder) omit weight data if there are vertices with identical position. so find it.
+        int n = bone_counts[vi];
+        auto *dst = &weights1[bone_offsets[vi]];
+        auto beg = points.begin();
+        auto end = beg + vi;
+        auto it = std::find(beg, end, points[vi]);
+        if (it != end) {
+            // found
+            weights1[bone_offsets[std::distance(beg, it)]].copy_to(dst, n);
+        }
+        else {
+            // not found. assign 1 to void divide-by-zero...
+            dst[0].weight = 1.0f;
+        }
+    };
+
+    // calculate bone weights
+    offset = 0;
+    for (int vi = 0; vi < num_vertices; ++vi) {
+        auto *dst = &weights1[offset];
+        int num_influence = 0;
+        for (int bi = 0; bi < num_bones; ++bi) {
+            float weight = bones[bi]->weights[vi];
+            if (weight > 0.0f) {
+                auto& w1 = dst[num_influence];
+                w1.weight = weight;
+                w1.index = bi;
+
+                ++num_influence;
+                if (num_influence == 255)
+                    break;
+            }
+        }
+        offset += num_influence;
+
+        if (dst->normalize(num_influence) == 0.0f) {
+            search_weight(vi);
+        }
+        else {
+            // Unity require descending order of weights
+            std::sort(dst, dst + num_influence,
+                [&](const Weights1& a, const Weights1& b) { return a.weight > b.weight; });
         }
     }
 }

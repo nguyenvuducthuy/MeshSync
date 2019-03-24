@@ -294,10 +294,10 @@ bool Server::isServing() const
     return m_serving;
 }
 
-void Server::beginServe()
+void Server::beginServeScene()
 {
     if (!m_current_get_request) {
-        msLogError("Server::beginServeMesh(): m_current_get_request is null\n");
+        msLogError("m_current_get_request is null\n");
         return;
     }
     m_host_scene.reset(new Scene());
@@ -311,19 +311,19 @@ void Server::beginServe()
     m_host_scene->settings = request.scene_settings;
 }
 
-void Server::endServe()
+void Server::endServeScene()
 {
     if (!m_current_get_request) {
-        msLogError("Server::endServeMesh(): m_current_get_request is null\n");
+        msLogError("m_current_get_request is null\n");
         return;
     }
     if (!m_host_scene) {
-        msLogError("Server::endServeMesh(): m_host_scene is null\n");
+        msLogError("m_host_scene is null\n");
         return;
     }
 
     auto& request = *m_current_get_request;
-    parallel_for_each(m_host_scene->entities.begin(), m_host_scene->entities.end(), [&request](TransformPtr& p) {
+    parallel_for_each(m_host_scene->entities.begin(), m_host_scene->entities.end(), [&request, this](TransformPtr& p) {
         auto pmesh = dynamic_cast<Mesh*>(p.get());
         if (!pmesh)
             return;
@@ -333,6 +333,7 @@ void Server::endServe()
         mesh.refine_settings.flags = request.refine_settings.flags;
         mesh.refine_settings.scale_factor = request.refine_settings.scale_factor;
         mesh.refine_settings.smooth_angle = 180.0f;
+        mesh.refine_settings.max_bone_influence = 0;
         mesh.refine(mesh.refine_settings);
     });
     request.ready = true;
@@ -465,6 +466,7 @@ void Server::recvSet(HTTPServerRequest& request, HTTPServerResponse& response, M
                 mesh.refine_settings.flags.split = 1;
                 mesh.refine_settings.flags.optimize_topology = 1;
                 mesh.refine_settings.split_unit = m_settings.mesh_split_unit;
+                mesh.refine_settings.max_bone_influence = m_settings.mesh_max_bone_influence;
                 mesh.refine(mesh.refine_settings);
             }
             else {

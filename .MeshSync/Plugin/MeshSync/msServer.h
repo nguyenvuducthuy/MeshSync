@@ -23,6 +23,7 @@ struct ServerSettings
     int max_threads = 8;
     uint16_t port = 8080;
     uint32_t mesh_split_unit = 0xffffffff;
+    int mesh_max_bone_influence = 4; // -1 (variable) or 4
 };
 
 class Server
@@ -47,8 +48,8 @@ public:
     void setServe(bool v);
     bool isServing() const;
 
-    void beginServe();
-    void endServe();
+    void beginServeScene();
+    void endServeScene();
 
     void setScrrenshotFilePath(const std::string& path);
     void setFileRootPath(const std::string& path);

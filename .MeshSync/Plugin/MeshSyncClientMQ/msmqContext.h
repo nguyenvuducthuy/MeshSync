@@ -16,6 +16,7 @@ struct msmqSettings
     bool sync_vertex_color = true;
     bool make_double_sided = false;
     bool sync_camera = true;
+    bool sync_morphs = true;
     bool sync_bones = true;
     bool sync_poses = true;
     bool sync_textures = true;
@@ -39,6 +40,14 @@ public:
     bool importMeshes(MQDocument doc);
 
 private:
+    struct MorphRecord
+    {
+        MQObject base_obj = nullptr;
+        MQObject target_obj = nullptr;
+        ms::MeshPtr base;
+        ms::BlendShapeDataPtr dst;
+    };
+
     struct ObjectRecord : public mu::noncopyable
     {
         MQObject obj = nullptr;
@@ -50,8 +59,8 @@ private:
         UINT bone_id = -1;
         UINT parent_id = -1;
         std::string name;
-        float3 world_pos = float3::zero();
-        quatf world_rot = quatf::identity();
+        float3 pose_pos = float3::zero();
+        quatf pose_rot = quatf::identity();
         float4x4 bindpose = float4x4::identity();
         ms::TransformPtr dst = ms::Transform::create();
     };
@@ -73,6 +82,7 @@ private:
     HostMeshes m_host_meshes;
 
     std::vector<ObjectRecord> m_obj_records;
+    std::map<UINT, MorphRecord> m_morph_records;
     std::map<UINT, BoneRecord> m_bone_records;
 
     ms::IDGenerator<MQCMaterial*> m_material_ids;

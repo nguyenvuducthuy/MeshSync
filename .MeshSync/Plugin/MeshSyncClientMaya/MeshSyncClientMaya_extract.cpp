@@ -5,36 +5,6 @@
 #include "msmayaCommands.h"
 
 
-static inline double GetDoubleValue(MFnDependencyNode& fn, const char *plug_name, const char *color_name, double def = 0.0)
-{
-    MString name = plug_name;
-    name += color_name;
-    auto plug = fn.findPlug(name, true);
-    if (!plug.isNull()) {
-        double ret = 0.0;
-        plug.getValue(ret);
-        return ret;
-    }
-    else {
-        return def;
-    }
-}
-
-static inline int GetIntValue(MFnDependencyNode& fn, const char *plug_name, const char *color_name, int def = 0)
-{
-    MString name = plug_name;
-    name += color_name;
-    auto plug = fn.findPlug(name, true);
-    if (!plug.isNull()) {
-        int ret = 0;
-        plug.getValue(ret);
-        return ret;
-    }
-    else {
-        return def;
-    }
-}
-
 static bool GetColorAndTexture(MFnDependencyNode& fn, const char *plug_name, mu::float4& color, std::string& texpath)
 {
     MPlug plug = fn.findPlug(plug_name, true);
@@ -72,10 +42,25 @@ static bool GetColorAndTexture(MFnDependencyNode& fn, const char *plug_name, mu:
     }
 
     if (texpath.empty()) {
+        auto get_color_element = [](MFnDependencyNode& fn, const char *plug_name, const char *color_name, double def = 0.0) -> double
+        {
+            MString name = plug_name;
+            name += color_name;
+            auto plug = fn.findPlug(name, true);
+            if (!plug.isNull()) {
+                double ret = 0.0;
+                plug.getValue(ret);
+                return ret;
+            }
+            else {
+                return def;
+            }
+        };
+
         color = {
-            (float)GetDoubleValue(fn, plug_name, "R"),
-            (float)GetDoubleValue(fn, plug_name, "G"),
-            (float)GetDoubleValue(fn, plug_name, "B"),
+            (float)get_color_element(fn, plug_name, "R"),
+            (float)get_color_element(fn, plug_name, "G"),
+            (float)get_color_element(fn, plug_name, "B"),
             1.0f,
         };
     }
@@ -159,41 +144,83 @@ ms::TransformPtr MeshSyncClientMaya::exportObject(TreeNode *n, bool force)
     return ret;
 }
 
-static void ExtractTransformData(TreeNode *n, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis)
+void MeshSyncClientMaya::extractTransformData(TreeNode *n, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis)
 {
     if (n->trans->isInstance()) {
         n = n->getPrimaryInstanceNode();
     }
 
-    // get TRS from world matrix.
-    // note: world matrix is a result of local TRS + parent TRS + constraints.
-    //       handling constraints by ourselves is extremely difficult. so getting TRS from world matrix is most reliable and easy way.
 
-    auto mat = mu::float4x4::identity();
-    {
-        auto& trans = n->trans->node;
-        MObject obj_wmat;
-        MFnDependencyNode(trans).findPlug("worldMatrix", true).elementByLogicalIndex(0).getValue(obj_wmat);
-        mat = to_float4x4(MFnMatrixData(obj_wmat).matrix());
-        vis = IsVisible(trans);
-    }
+    // maya-compatible transform extraction
+    auto maya_compatible_transform_extraction = [n]() {
+        // get TRS from world matrix.
+        // note: world matrix is a result of local TRS + parent TRS + constraints.
+        //       handling constraints by ourselves is extremely difficult. so getting TRS from world matrix is most reliable and easy way.
 
-    // get inverse parent matrix to calculate local matrix.
-    // note: using parentInverseMatrix plug seems more appropriate, but it seems sometimes have incorrect value on Maya2016...
-    if (n->parent) {
-        auto& parent = n->parent->trans->node;
-        MObject obj_pwmat;
-        MFnDependencyNode(parent).findPlug("worldMatrix", true).elementByLogicalIndex(0).getValue(obj_pwmat);
-        auto pwmat = to_float4x4(MFnMatrixData(obj_pwmat).matrix());
-        mat *= mu::invert(pwmat);
-    }
+        auto mat = mu::float4x4::identity();
+        {
+            auto& trans = n->trans->node;
+            MObject obj_wmat;
+            MFnDependencyNode(trans).findPlug("worldMatrix", true).elementByLogicalIndex(0).getValue(obj_wmat);
+            mat = to_float4x4(MFnMatrixData(obj_wmat).matrix());
+        }
 
-    pos = extract_position(mat);
-    rot = extract_rotation(mat);
-    scale = extract_scale(mat);
+        // get inverse parent matrix to calculate local matrix.
+        // note: using parentInverseMatrix plug seems more appropriate, but it seems sometimes have incorrect value on Maya2016...
+        if (n->parent) {
+            auto& parent = n->parent->trans->node;
+            MObject obj_pwmat;
+            MFnDependencyNode(parent).findPlug("worldMatrix", true).elementByLogicalIndex(0).getValue(obj_pwmat);
+            auto pwmat = to_float4x4(MFnMatrixData(obj_pwmat).matrix());
+            mat *= mu::invert(pwmat);
+        }
+
+        auto& td = n->transform_data;
+        td.translation = extract_position(mat);
+        td.pivot = mu::float3::zero();
+        td.pivot_offset = mu::float3::zero();
+        td.rotation = extract_rotation(mat);
+        td.scale = extract_scale(mat);
+        n->model_transform = mu::float4x4::identity();
+    };
+
+    // fbx-compatible transform extraction
+    // - scale pivot is ignored
+    // - rotation orientation is ignored
+    auto fbx_compatible_transform_extraction = [n]() {
+        MFnTransform fn_trans(n->getDagPath(false));
+
+        MQuaternion r;
+        double s[3];
+        fn_trans.getRotation(r);
+        fn_trans.getScale(s);
+
+        auto& td = n->transform_data;
+        td.translation = to_float3(fn_trans.getTranslation(MSpace::kTransform));
+        td.pivot = to_float3(fn_trans.rotatePivot(MSpace::kTransform));
+        td.pivot_offset = to_float3(fn_trans.rotatePivotTranslation(MSpace::kTransform));
+        td.rotation = to_quatf(r);
+        td.scale = to_float3(s);
+
+        n->model_transform = mu::float4x4::identity();
+        (mu::float3&)n->model_transform[3] = -td.pivot;
+    };
+
+    if (!m_settings.fbx_compatible_transform || n->shape->node.hasFn(MFn::kJoint))
+        maya_compatible_transform_extraction();
+    else
+        fbx_compatible_transform_extraction();
+
+    auto& td = n->transform_data;
+    pos = td.translation + td.pivot + td.pivot_offset;
+    if (n->parent)
+        pos -= n->parent->transform_data.pivot;
+    rot = td.rotation;
+    scale = td.scale;
+    vis = IsVisible(n->trans->node);
 }
 
-static void ExtractCameraData(TreeNode *n, bool& ortho, float& near_plane, float& far_plane, float& fov,
+void MeshSyncClientMaya::extractCameraData(TreeNode *n, bool& ortho, float& near_plane, float& far_plane, float& fov,
     float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance)
 {
     auto& shape = n->shape->node;
@@ -210,7 +237,7 @@ static void ExtractCameraData(TreeNode *n, bool& ortho, float& near_plane, float
     focus_distance = (float)mcam.focusDistance();
 }
 
-static void ExtractLightData(TreeNode *n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& spot_angle)
+void MeshSyncClientMaya::extractLightData(TreeNode *n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& spot_angle)
 {
     auto& shape = n->shape->node;
     if (shape.hasFn(MFn::kSpotLight)) {
@@ -253,7 +280,7 @@ ms::TransformPtr MeshSyncClientMaya::exportTransform(TreeNode *n)
     auto ret = createEntity<ms::Transform>(*n);
     auto& dst = *ret;
 
-    ExtractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
+    extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
 
     m_entity_manager.add(ret);
     return ret;
@@ -264,10 +291,10 @@ ms::CameraPtr MeshSyncClientMaya::exportCamera(TreeNode *n)
     auto ret = createEntity<ms::Camera>(*n);
     auto& dst = *ret;
 
-    ExtractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
+    extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
     dst.rotation = mu::flipY(dst.rotation);
 
-    ExtractCameraData(n, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov,
+    extractCameraData(n, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov,
         dst.horizontal_aperture, dst.vertical_aperture, dst.focal_length, dst.focus_distance);
 
     m_entity_manager.add(ret);
@@ -279,10 +306,10 @@ ms::LightPtr MeshSyncClientMaya::exportLight(TreeNode *n)
     auto ret = createEntity<ms::Light>(*n);
     auto& dst = *ret;
 
-    ExtractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
+    extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
     dst.rotation = mu::flipY(dst.rotation);
 
-    ExtractLightData(n, dst.light_type, dst.color, dst.intensity, dst.spot_angle);
+    extractLightData(n, dst.light_type, dst.color, dst.intensity, dst.spot_angle);
 
     m_entity_manager.add(ret);
     return ret;
@@ -293,7 +320,7 @@ ms::MeshPtr MeshSyncClientMaya::exportMesh(TreeNode *n)
     auto ret = createEntity<ms::Mesh>(*n);
     auto& dst = *ret;
 
-    ExtractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
+    extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible_hierarchy);
 
     auto task = [this, ret, &dst, n]() {
         if (m_settings.sync_meshes) {
@@ -301,10 +328,6 @@ ms::MeshPtr MeshSyncClientMaya::exportMesh(TreeNode *n)
                 doExtractMeshDataBaked(dst, n);
             else
                 doExtractMeshData(dst, n);
-
-            //// handle pivot
-            //dst.refine_settings.flags.apply_local2world = 1;
-            //dst.refine_settings.local2world = GetPivotMatrix(n->trans->node);
 
             dst.flags.has_refine_settings = 1;
             dst.flags.apply_trs = 1;
@@ -776,6 +799,11 @@ void MeshSyncClientMaya::doExtractMeshData(ms::Mesh& dst, TreeNode *n)
             }
         }
     }
+    else {
+        // apply pivot
+        dst.refine_settings.flags.apply_local2world = 1;
+        dst.refine_settings.local2world = n->model_transform;
+    }
 
     // apply tweaks
     if (m_settings.apply_tweak) {
@@ -791,10 +819,12 @@ void MeshSyncClientMaya::doExtractMeshDataBaked(ms::Mesh& dst, TreeNode *n)
     auto& trans = n->trans->node;
     auto& shape = n->shape->node;
 
-    if (!shape.hasFn(MFn::kMesh)) { return; }
+    if (!shape.hasFn(MFn::kMesh))
+        return;
 
     dst.visible = IsVisible(shape);
-    if (!dst.visible) { return; }
+    if (!dst.visible)
+        return;
 
     MStatus mstat;
     MFnMesh mmesh(shape);
@@ -813,6 +843,11 @@ void MeshSyncClientMaya::doExtractMeshDataBaked(ms::Mesh& dst, TreeNode *n)
     }
 
     doExtractMeshDataImpl(dst, mmesh, mmesh);
+
+    // apply pivot
+    dst.refine_settings.flags.apply_local2world = 1;
+    dst.refine_settings.local2world = n->model_transform;
+
     dst.setupFlags();
 }
 
@@ -960,7 +995,7 @@ void MeshSyncClientMaya::extractTransformAnimationData(ms::Animation& dst_, Tree
     auto rot = mu::quatf::identity();
     auto scale = mu::float3::one();
     bool vis = true;
-    ExtractTransformData(n, pos, rot, scale, vis);
+    extractTransformData(n, pos, rot, scale, vis);
 
     float t = m_anim_time;
     dst.translation.push_back({ t, pos });
@@ -981,7 +1016,7 @@ void MeshSyncClientMaya::extractCameraAnimationData(ms::Animation& dst_, TreeNod
 
     bool ortho;
     float near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance;
-    ExtractCameraData(n, ortho, near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance);
+    extractCameraData(n, ortho, near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance);
 
     float t = m_anim_time;
     dst.near_plane.push_back({ t, near_plane });
@@ -1011,7 +1046,7 @@ void MeshSyncClientMaya::extractLightAnimationData(ms::Animation& dst_, TreeNode
     mu::float4 color;
     float intensity;
     float spot_angle;
-    ExtractLightData(n, type, color, intensity, spot_angle);
+    extractLightData(n, type, color, intensity, spot_angle);
 
     float t = m_anim_time;
     dst.color.push_back({ t, color });
