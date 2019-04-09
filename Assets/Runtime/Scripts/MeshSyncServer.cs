@@ -178,7 +178,8 @@ namespace UTJ.MeshSync
         [SerializeField] bool m_updateMeshColliders = true;
         [SerializeField] bool m_findMaterialFromAssets = true;
         [SerializeField] bool m_trackMaterialAssignment = true;
-        [SerializeField] InterpolationType m_animtionInterpolation = InterpolationType.Smooth;
+        [SerializeField] InterpolationMode m_animtionInterpolation = InterpolationMode.Smooth;
+        [SerializeField] bool m_reuseExistingAnimationClip = false;
         [Space(10)]
         [SerializeField] bool m_progressiveDisplay = true;
         [SerializeField] bool m_logging = true;
@@ -221,7 +222,7 @@ namespace UTJ.MeshSync
         }
         public string assetPath
         {
-            get { return "Assets/" + m_assetDir.leaf; }
+            get { return m_assetDir.leaf.Length != 0 ? "Assets/" + m_assetDir.leaf : "Assets"; }
         }
         public string httpFileRootPath
         {
@@ -436,7 +437,11 @@ namespace UTJ.MeshSync
 
                     EntityRecord srcrec = null;
                     if (m_clientObjects.TryGetValue(dstrec.reference, out srcrec) && srcrec.go != null)
+                    {
+                        dstrec.materialIDs = srcrec.materialIDs;
+                        dstrec.submeshCounts = srcrec.submeshCounts;
                         UpdateReference(dstrec.go, srcrec.go);
+                    }
                 }
 
                 // sort objects by index
@@ -1041,17 +1046,28 @@ namespace UTJ.MeshSync
 #if UNITY_EDITOR
             if (m_findMaterialFromAssets && (dst.material == null || dst.name != materialName))
             {
+                Material candidate = null;
+
                 var guids = AssetDatabase.FindAssets("t:Material " + materialName);
                 foreach (var guid in guids)
                 {
-                    var material = AssetDatabase.LoadAssetAtPath<Material>(AssetDatabase.GUIDToAssetPath(guid));
+                    var path = AssetDatabase.GUIDToAssetPath(guid);
+                    var material = AssetDatabase.LoadAssetAtPath<Material>(path);
                     if (material.name == materialName)
                     {
-                        dst.material = material;
-                        dst.materialIID = 0; // ignore material params
-                        m_needReassignMaterials = true;
-                        break;
+                        candidate = material;
+
+                        // if there are multiple candidates, prefer the editable one (= not a part of fbx etc)
+                        if (((int)material.hideFlags & (int)HideFlags.NotEditable) == 0)
+                            break;
                     }
+                }
+
+                if (candidate != null)
+                {
+                    dst.material = candidate;
+                    dst.materialIID = 0; // ignore material params
+                    m_needReassignMaterials = true;
                 }
             }
 #endif
@@ -1746,18 +1762,7 @@ namespace UTJ.MeshSync
         void UpdateAnimation(AnimationClipData clipData)
         {
 #if UNITY_EDITOR
-            InterpolationMethod interpolation = AnimationData.SmoothInterpolation;
-            switch (m_animtionInterpolation)
-            {
-                case InterpolationType.Linear:
-                    interpolation = AnimationData.LinearInterpolation;
-                    break;
-                case InterpolationType.Constant:
-                    interpolation = AnimationData.ConstantInterpolation;
-                    break;
-                default:
-                    break;
-            }
+            //float start = Time.realtimeSinceStartup;
 
             var animClipCache = new Dictionary<GameObject, AnimationClip>();
 
@@ -1782,7 +1787,7 @@ namespace UTJ.MeshSync
                 AnimationClip clip = null;
                 if (!animClipCache.TryGetValue(root.gameObject, out clip))
                 {
-                    if (animator.runtimeAnimatorController != null)
+                    if (m_reuseExistingAnimationClip && animator.runtimeAnimatorController != null)
                     {
                         var clips = animator.runtimeAnimatorController.animationClips;
                         if (clips != null && clips.Length > 0)
@@ -1817,14 +1822,16 @@ namespace UTJ.MeshSync
                     animPath = animPath.Remove(0, 1);
 
                 // get animation curves
-                data.ExportToClip(clip, root.gameObject, target.gameObject, animPath, interpolation);
+                data.ExportToClip(clip, root.gameObject, target.gameObject, animPath, m_animtionInterpolation);
             }
 
             // smooth rotation curves
-            if (m_animtionInterpolation == InterpolationType.Smooth)
+            if (m_animtionInterpolation == InterpolationMode.Smooth)
                 foreach (var kvp in animClipCache)
                     kvp.Value.EnsureQuaternionContinuity();
 
+            //Debug.Log("UpdateAnimation() " + (Time.realtimeSinceStartup - start) + " sec");
+            
             // fire event
             if (onUpdateAnimation != null)
                 foreach (var kvp in animClipCache)
@@ -2209,7 +2216,7 @@ namespace UTJ.MeshSync
         void CheckMaterialAssignedViaEditor()
         {
             bool changed = false;
-            foreach(var kvp in m_clientObjects)
+            foreach (var kvp in m_clientObjects)
             {
                 var rec = kvp.Value;
                 if (rec.go != null && rec.go.activeInHierarchy)

@@ -459,6 +459,9 @@ bool MeshSyncClientMaya::sendScene(SendScope scope, bool dirty_all)
     }
     m_pending_scope = SendScope::None;
 
+    if (scope == SendScope::All) {
+        m_entity_manager.clearEntityRecords();
+    }
     if (dirty_all) {
         m_material_manager.makeDirtyAll();
         m_entity_manager.makeDirtyAll();
@@ -609,12 +612,6 @@ bool MeshSyncClientMaya::recvScene()
 
     ms::Client client(m_settings.client_settings);
     ms::GetMessage gd;
-    gd.flags.get_transform = 1;
-    gd.flags.get_indices = 1;
-    gd.flags.get_points = 1;
-    gd.flags.get_uv0 = 1;
-    gd.flags.get_uv1 = 1;
-    gd.flags.get_material_ids = 1;
     gd.scene_settings.handedness = ms::Handedness::Right;
     gd.scene_settings.scale_factor = 1.0f / m_settings.scale_factor;
     gd.refine_settings.flags.bake_skin = m_settings.bake_skin;

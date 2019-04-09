@@ -11,6 +11,7 @@ Unity と DCC ツール両方のプラグインとして機能し、現在 [Maya
 2. [Maya LT](#maya-lt)
 3. [3ds Max](#3ds-max)
 3. [Motion Builder](#motion-builder)
+3. [Modo](#modo)
 4. [Blender](#blender)
 5. [メタセコイア](#メタセコイア)
 5. [VRED](#vred)
@@ -53,11 +54,11 @@ Maya 2015, 2016, 2016.5, 2017, 2018, 2019 + Windows, Mac, Linux (CentOS 7) で�
 
 
 ### 3ds Max
-3ds Max 2016, 2017, 2018, 2019 + Windows で動作を確認しています。
+3ds Max 2016, 2017, 2018, 2019, 2020 + Windows で動作を確認しています。
 - インストール：
   - [releases](https://github.com/unity3d-jp/MeshSync/releases) から UnityMeshSync_3dsMax_Windows.zip をダウンロード
   - MeshSyncClient3dsMax.dlu をプラグイン用パスとして登録されているディレクトリにコピー
-    - プラグイン用パスは max 内の Configure -> Customize System Paths -> 3rd Party Plug-Ins の Add で追加できます
+    - プラグイン用パスは max 内の Customize -> Configure User and System Paths -> 3rd Party Plug-Ins の Add で追加できます
     - デフォルトで用意されているパス (C:\Program Files\Autodesk\3ds Max 2019\Plugins など) でもおそらく機能しますが、デフォルトとそれ以外で別のパスを用意しておくことをおすすめします
 - インストール後、メインメニューバーに "UnityMeshSync" が追加されているので、それの "Window" から設定ウィンドウを開けます。
   - メニューバーを編集する場合、Action に "UnityMeshSync" カテゴリが追加されているので、そちらから MeshSync の機能にアクセスできます
@@ -101,6 +102,31 @@ Motion Builder 2015, 2016, 2017, 2018, 2019 + Windows, Linux (CentOS 7) で動�
 - 負のスケールは部分的にしかサポートしていないので注意が必要です
   - XYZ 全てが負の場合は正しく同期できますが、X だけ、Y だけ負のような場合も Unity 側では XYZ 全てが負として扱われてしまいます
 - NURBS などポリゴン以外の形状データは対応していません
+
+
+### Modo
+<img src="https://user-images.githubusercontent.com/1488611/55697991-d9135980-59fe-11e9-8e9f-8fcfba1b234f.png" height=300><img src="https://user-images.githubusercontent.com/1488611/55697990-d9135980-59fe-11e9-9312-29c95e20e5b0.png" height=300>
+
+Modo 10, 12, 13 + Windows, Mac, Linux で動作を確認しています。
+- インストール：
+  - [releases](https://github.com/unity3d-jp/MeshSync/releases) から UnityMeshSync_Modo_*.zip をダウンロードして展開
+  - Modo 内の System -> Add Plug-in で MeshSyncClientModo.fx を指定
+- インストール後は新たな View が追加されており、ここから各種設定や機能にアクセスできます (Application -> Custom View -> UnityMeshSync)
+- "Auto Sync" がチェックされている間は編集が自動的に Unity 側に反映されます。Auyo Sync が無効でも "Manual Sync" ボタンを押すことで手動で反映できます
+- Animations の Sync を押すと、開始フレームから終了フレームまで時間を進めつつアニメーションをベイクして Unity に送ります。
+
+&nbsp;  
+
+- ポリゴンメッシュ、カメラ、ライトの同期に対応しています。
+- Mesh Instance や Replicator も部分的にサポートしています
+- ポリゴンメッシュはスキニング / Joint と Morph も Unity へ持ってこれるようになっていますが、デフォーマの扱いには注意が必要です。
+  - MeshSync が解釈できるデフォーマは Joint + Weight Map 方式のスキニングと Morph のみです。それ以外のデフォーマは無視されます。
+  - Mesh Instance や Replicator のスキニングは正しく Unity 側に反映できません。後述の "Bake Deformers" を使う必要があります。
+  - "Bake Deformers" をチェックすると、デフォーマを全て適用した結果を同期します。複雑なデフォーマ構成であっても Unity 側の Mesh の内容がほぼ一致するようになりますが、代償としてスキニングや Morph/Blendshape の情報が失われます。
+- "Double Sided" をチェックすると Unity 側で Mesh が両面化されます。
+- 負のスケールは部分的にしかサポートしていないので注意が必要です
+  - XYZ 全てが負の場合は正しく同期できますが、X だけ、Y だけ負のような場合も Unity 側では XYZ 全てが負として扱われてしまいます
+- コマンドからも MeshSync の機能にアクセスできます。unity.meshsync.settings 設定変更、unity.meshsync.export エクスポートできます
 
 <img align="right" src="https://user-images.githubusercontent.com/1488611/49272332-79d39480-f4b4-11e8-8ca3-0ce0bc90a965.png" height=400>
 
