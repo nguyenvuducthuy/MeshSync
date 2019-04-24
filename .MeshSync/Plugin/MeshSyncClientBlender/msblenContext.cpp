@@ -1,30 +1,28 @@
 #include "pch.h"
-#include "MeshSyncClientBlender.h"
-#include "msbContext.h"
-#include "msbUtils.h"
-using namespace mu;
+#include "msblenContext.h"
+#include "msblenUtils.h"
 
 
-msbContext::msbContext()
+msblenContext::msblenContext()
 {
-    m_settings.scene_settings.handedness = ms::Handedness::LeftZUp;
+    m_settings.scene_settings.handedness = ms::Handedness::RightZUp;
 }
 
-msbContext::~msbContext()
+msblenContext::~msblenContext()
 {
-    m_sender.wait();
+    wait();
 }
 
-msbSettings& msbContext::getSettings() { return m_settings; }
-const msbSettings& msbContext::getSettings() const { return m_settings; }
+msblenSettings& msblenContext::getSettings() { return m_settings; }
+const msblenSettings& msblenContext::getSettings() const { return m_settings; }
 
 
-int msbContext::exportTexture(const std::string & path, ms::TextureType type)
+int msblenContext::exportTexture(const std::string & path, ms::TextureType type)
 {
     return m_texture_manager.addFile(path, type);
 }
 
-void msbContext::exportMaterials()
+void msblenContext::exportMaterials()
 {
     int midx = 0;
     auto bpy_data = bl::BData(bl::BContext::get().data());
@@ -45,7 +43,7 @@ void msbContext::exportMaterials()
             }
 #endif
         }
-        stdmat.setColor(float4{ color_src->r, color_src->g, color_src->b, 1.0f });
+        stdmat.setColor(mu::float4{ color_src->r, color_src->g, color_src->b, 1.0f });
 
         if (m_settings.sync_textures) {
             auto export_texture = [this](MTex *mtex, ms::TextureType type) -> int {
@@ -65,31 +63,45 @@ void msbContext::exportMaterials()
 }
 
 
-static void ExtractTransformData(Object *src, float3& t, quatf& r, float3& s, bool& vis)
+static void ExtractTransformData(Object *src, mu::float3& t, mu::quatf& r, mu::float3& s, bool& vis)
 {
     extract_local_TRS(src, t, r, s);
     vis = is_visible(src);
+
+    if (src->type == OB_CAMERA) {
+        static const auto cr = mu::rotate_z(180.0f * mu::DegToRad) * mu::rotate_x(-180.0f * mu::DegToRad);
+        r *= cr;
+    }
+    else if (src->type == OB_LAMP) {
+        static const auto cr = mu::rotate_x(-180.0f * mu::DegToRad);
+        r *= cr;
+    }
 }
 static void ExtractTransformData(Object *src, ms::Transform& dst)
 {
     ExtractTransformData(src, dst.position, dst.rotation, dst.scale, dst.visible);
 }
 
-static void ExtractCameraData(Object *src, bool& ortho, float& near_plane, float& far_plane, float& fov)
+static void ExtractCameraData(Object *src, bool& ortho, float& near_plane, float& far_plane, float& fov,
+    float& focal_length, mu::float2& sensor_size, mu::float2& lens_shift)
 {
-    auto data = (Camera*)src->data;
-    ortho = data->type == CAM_ORTHO;
-#if BLENDER_VERSION < 280
-    near_plane = data->clipsta;
-    far_plane = data->clipend;
-#else
-    near_plane = data->clip_start;
-    far_plane = data->clip_end;
-#endif
-    fov = bl::BCamera(data).fov_vertical() * mu::Rad2Deg;
+    bl::BCamera cam(src->data);
+
+    // fbx exporter seems always export as perspective. so we follow it.
+    //ortho = data->type == CAM_ORTHO;
+    ortho = false;
+
+    near_plane = cam.clip_start();
+    far_plane = cam.clip_end();
+    fov = cam.angle_y() * mu::RadToDeg;
+    focal_length = cam.lens();
+    sensor_size.x = cam.sensor_width();
+    sensor_size.y = cam.sensor_height();
+    lens_shift.x = cam.shift_x();
+    lens_shift.y = cam.shift_y();
 }
 
-static void ExtractLightData(Object *src, ms::Light::LightType& type, float4& color, float& intensity, float& range, float& spot_angle)
+static void ExtractLightData(Object *src, ms::Light::LightType& type, mu::float4& color, float& intensity, float& range, float& spot_angle)
 {
     auto data =
 #if BLENDER_VERSION < 280
@@ -97,7 +109,7 @@ static void ExtractLightData(Object *src, ms::Light::LightType& type, float4& co
 #else
         (Light*)src->data;
 #endif
-    color = (float4&)data->r;
+    color = (mu::float4&)data->r;
     intensity = data->energy;
     range = data->dist;
 
@@ -107,7 +119,7 @@ static void ExtractLightData(Object *src, ms::Light::LightType& type, float4& co
         break;
     case LA_SPOT:
         type = ms::Light::LightType::Spot;
-        spot_angle = data->spotsize * mu::Rad2Deg;
+        spot_angle = data->spotsize * mu::RadToDeg;
         break;
     case LA_AREA:
         type = ms::Light::LightType::Area;
@@ -119,7 +131,7 @@ static void ExtractLightData(Object *src, ms::Light::LightType& type, float4& co
 }
 
 
-ms::TransformPtr msbContext::exportObject(Object *obj, bool force)
+ms::TransformPtr msblenContext::exportObject(Object *obj, bool parent, bool tip)
 {
     ms::TransformPtr ret;
     if (!obj)
@@ -128,29 +140,39 @@ ms::TransformPtr msbContext::exportObject(Object *obj, bool force)
     auto& rec = touchRecord(obj);
     if (rec.exported)
         return ret; // already exported
-    rec.exported = true;
 
-    bool exported = false;
-    auto on_export = [this, obj, &exported]() {
-        exportObject(obj->parent, true);
-        exported = true;
+    auto handle_parent = [&]() {
+        if (parent)
+            exportObject(obj->parent, parent, false);
+    };
+    auto handle_transform = [&]() {
+        handle_parent();
+        ret = exportTransform(obj);
     };
 
     switch (obj->type) {
     case OB_ARMATURE:
     {
-        if (m_settings.sync_bones) {
-            on_export();
+        if (!m_settings.bake_modifiers && m_settings.sync_bones) {
+            handle_parent();
             ret = exportArmature(obj);
         }
+        else if (!tip && parent)
+            handle_transform();
         break;
     }
     case OB_MESH:
     {
-        if (m_settings.sync_meshes || m_settings.sync_blendshapes) {
-            on_export();
+        if (!m_settings.bake_modifiers && m_settings.sync_bones) {
+            if (auto *arm_mod = (const ArmatureModifierData*)find_modofier(obj, eModifierType_Armature))
+                exportObject(arm_mod->object, parent);
+        }
+        if (m_settings.sync_meshes || (!m_settings.bake_modifiers && m_settings.sync_blendshapes)) {
+            handle_parent();
             ret = exportMesh(obj);
         }
+        else if (!tip && parent)
+            handle_transform();
         break;
     }
     case OB_FONT:  //
@@ -159,45 +181,51 @@ ms::TransformPtr msbContext::exportObject(Object *obj, bool force)
     case OB_MBALL: // these can be converted to mesh
     {
         if (m_settings.sync_meshes && m_settings.convert_to_mesh) {
-            on_export();
+            handle_parent();
             ret = exportMesh(obj);
         }
+        else if (!tip && parent)
+            handle_transform();
         break;
     }
     case OB_CAMERA:
     {
         if (m_settings.sync_cameras) {
-            on_export();
+            handle_parent();
             ret = exportCamera(obj);
         }
+        else if (!tip && parent)
+            handle_transform();
         break;
     }
     case OB_LAMP:
     {
         if (m_settings.sync_lights) {
-            on_export();
+            handle_parent();
             ret = exportLight(obj);
         }
+        else if (!tip && parent)
+            handle_transform();
         break;
     }
     default:
     {
-        if (get_instance_collection(obj) || force) {
-            on_export();
+        if (get_instance_collection(obj) || (!tip && parent)) {
+            handle_parent();
             ret = exportTransform(obj);
         }
         break;
     }
     }
 
-    if (ret)
-        exportDupliGroup(obj, ret->path);
-    if (!exported)
-        m_entity_manager.erase(rec.path);
+    if (ret) {
+        exportDupliGroup(obj, obj, ret->path);
+        rec.exported = true;
+    }
     return ret;
 }
 
-ms::TransformPtr msbContext::exportTransform(Object *src)
+ms::TransformPtr msblenContext::exportTransform(Object *src)
 {
     auto ret = ms::Transform::create();
     auto& dst = *ret;
@@ -207,7 +235,7 @@ ms::TransformPtr msbContext::exportTransform(Object *src)
     return ret;
 }
 
-ms::TransformPtr msbContext::exportPose(Object *armature, bPoseChannel *src)
+ms::TransformPtr msblenContext::exportPose(Object *armature, bPoseChannel *src)
 {
     auto ret = ms::Transform::create();
     auto& dst = *ret;
@@ -217,7 +245,7 @@ ms::TransformPtr msbContext::exportPose(Object *armature, bPoseChannel *src)
     return ret;
 }
 
-ms::TransformPtr msbContext::exportArmature(Object *src)
+ms::TransformPtr msblenContext::exportArmature(Object *src)
 {
     auto ret = ms::Transform::create();
     auto& dst = *ret;
@@ -233,7 +261,7 @@ ms::TransformPtr msbContext::exportArmature(Object *src)
     return ret;
 }
 
-ms::TransformPtr msbContext::exportReference(Object *src, const std::string& base_path)
+ms::TransformPtr msblenContext::exportReference(Object *src, Object *host, const std::string& base_path)
 {
     auto local_path = get_path(src);
     auto path = base_path + local_path;
@@ -242,16 +270,18 @@ ms::TransformPtr msbContext::exportReference(Object *src, const std::string& bas
     dst->path = path;
     dst->reference = local_path;
     ExtractTransformData(src, *dst);
-    exportDupliGroup(src, path);
+    dst->visible = true; // todo: correct me
+
+    exportDupliGroup(src, host, path);
     m_entity_manager.add(dst);
 
-    each_child(src, [this, &path](Object *child) {
-        exportReference(child, path);
+    each_child(src, [&](Object *child) {
+        exportReference(child, host, path);
     });
     return dst;
 }
 
-ms::TransformPtr msbContext::exportDupliGroup(Object *src, const std::string& base_path)
+ms::TransformPtr msblenContext::exportDupliGroup(Object *src, Object *host, const std::string& base_path)
 {
     auto group = get_instance_collection(src);
     if (!group)
@@ -262,8 +292,8 @@ ms::TransformPtr msbContext::exportDupliGroup(Object *src, const std::string& ba
 
     auto dst = ms::Transform::create();
     dst->path = path;
-    dst->position = -swap_yz(get_instance_offset(group));
-    dst->visible_hierarchy = is_visible(src);
+    dst->position = -get_instance_offset(group);
+    dst->visible_hierarchy = is_visible(host); // todo: correct me
     m_entity_manager.add(dst);
 
     auto gobjects = bl::list_range((CollectionObject*)group->gobject.first);
@@ -272,38 +302,34 @@ ms::TransformPtr msbContext::exportDupliGroup(Object *src, const std::string& ba
         if (auto t = exportObject(obj, false)) {
             t->visible = obj->id.lib == nullptr;
         }
-        exportReference(obj, path);
+        exportReference(obj, host, path);
     }
     return dst;
 }
 
-ms::CameraPtr msbContext::exportCamera(Object *src)
+ms::CameraPtr msblenContext::exportCamera(Object *src)
 {
     auto ret = ms::Camera::create();
     auto& dst = *ret;
     dst.path = get_path(src);
     ExtractTransformData(src, dst);
-    dst.rotation *= rotateX(90.0f * Deg2Rad);
-
-    ExtractCameraData(src, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov);
+    ExtractCameraData(src, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov, dst.focal_length, dst.sensor_size, dst.lens_shift);
     m_entity_manager.add(ret);
     return ret;
 }
 
-ms::LightPtr msbContext::exportLight(Object *src)
+ms::LightPtr msblenContext::exportLight(Object *src)
 {
     auto ret = ms::Light::create();
     auto& dst = *ret;
     dst.path = get_path(src);
     ExtractTransformData(src, dst);
-    dst.rotation *= rotateX(90.0f * Deg2Rad);
-
     ExtractLightData(src, dst.light_type, dst.color, dst.intensity, dst.range, dst.spot_angle);
     m_entity_manager.add(ret);
     return ret;
 }
 
-ms::MeshPtr msbContext::exportMesh(Object *src)
+ms::MeshPtr msblenContext::exportMesh(Object *src)
 {
     // ignore particles
     if (//find_modofier(src, eModifierType_ParticleSystem) ||
@@ -338,8 +364,7 @@ ms::MeshPtr msbContext::exportMesh(Object *src)
 
     if (m_settings.sync_meshes) {
         bool need_convert = 
-            (!is_editing && m_settings.bake_modifiers) ||
-            (src->type != OB_MESH);
+            (!is_editing && m_settings.bake_modifiers) || (src->type != OB_MESH);
 
         if (need_convert) {
             Mesh *tmp =
@@ -376,14 +401,13 @@ ms::MeshPtr msbContext::exportMesh(Object *src)
     return ret;
 }
 
-void msbContext::doExtractMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
+void msblenContext::doExtractMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
 {
     if (m_settings.sync_meshes) {
         bl::BObject bobj(obj);
         bl::BMesh bmesh(data);
         bool is_editing = get_edit_mesh(bmesh.ptr()) != nullptr;
 
-        dst.refine_settings.flags.swap_faces = true;
         if (is_editing) {
             doExtractEditMeshData(dst, obj, data);
         }
@@ -395,18 +419,16 @@ void msbContext::doExtractMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
             // mirror
             if (auto *mirror = (const MirrorModifierData*)find_modofier(obj, eModifierType_Mirror)) {
                 if (mirror->flag & MOD_MIR_AXIS_X) dst.refine_settings.flags.mirror_x = 1;
-                if (mirror->flag & MOD_MIR_AXIS_Y) dst.refine_settings.flags.mirror_z = 1;
-                if (mirror->flag & MOD_MIR_AXIS_Z) dst.refine_settings.flags.mirror_y = 1;
+                if (mirror->flag & MOD_MIR_AXIS_Y) dst.refine_settings.flags.mirror_y = 1;
+                if (mirror->flag & MOD_MIR_AXIS_Z) dst.refine_settings.flags.mirror_z = 1;
                 if (mirror->mirror_ob) {
                     dst.refine_settings.flags.mirror_basis = 1;
-                    float4x4 wm = bobj.matrix_world();
-                    float4x4 mm = bl::BObject(mirror->mirror_ob).matrix_world();
-                    dst.refine_settings.mirror_basis = mu::swap_yz(wm * mu::invert(mm));
+                    mu::float4x4 wm = bobj.matrix_world();
+                    mu::float4x4 mm = bl::BObject(mirror->mirror_ob).matrix_world();
+                    dst.refine_settings.mirror_basis = wm * mu::invert(mm);
                 }
             }
         }
-        dst.convertHandedness_Mesh(false, true);
-        dst.convertHandedness_BlendShapes(false, true);
     }
     else {
         if (!m_settings.bake_modifiers && m_settings.sync_blendshapes) {
@@ -421,16 +443,17 @@ void msbContext::doExtractMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
         dst.refine_settings.flags.gen_normals = true;
     if (!dst.flags.has_tangents)
         dst.refine_settings.flags.gen_tangents = true;
+    dst.refine_settings.flags.flip_faces = true;
     dst.refine_settings.flags.make_double_sided = m_settings.make_double_sided;
 }
 
-void msbContext::doExtractBlendshapeWeights(ms::Mesh& dst, Object *obj, Mesh *data)
+void msblenContext::doExtractBlendshapeWeights(ms::Mesh& dst, Object *obj, Mesh *data)
 {
     auto& mesh = *data;
     if (!m_settings.bake_modifiers) {
         // blend shapes
         if (m_settings.sync_blendshapes && mesh.key) {
-            RawVector<float3> basis;
+            RawVector<mu::float3> basis;
             int bi = 0;
             each_key(&mesh, [&](const KeyBlock *kb) {
                 if (bi == 0) { // Basis
@@ -445,7 +468,7 @@ void msbContext::doExtractBlendshapeWeights(ms::Mesh& dst, Object *obj, Mesh *da
     }
 }
 
-void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
+void msblenContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
 {
     bl::BObject bobj(obj);
     bl::BMesh bmesh(data);
@@ -468,7 +491,7 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
     // vertices
     dst.points.resize_discard(num_vertices);
     for (size_t vi = 0; vi < num_vertices; ++vi) {
-        dst.points[vi] = (float3&)vertices[vi].co;
+        dst.points[vi] = (mu::float3&)vertices[vi].co;
     }
 
     // faces
@@ -517,7 +540,7 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
         if (!loop_uv.empty()) {
             dst.uv0.resize_discard(num_indices);
             for (size_t ii = 0; ii < num_indices; ++ii)
-                dst.uv0[ii] = (float2&)loop_uv[ii].uv;
+                dst.uv0[ii] = (mu::float2&)loop_uv[ii].uv;
         }
     }
 
@@ -574,12 +597,12 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
 
         // blend shapes
         if (m_settings.sync_blendshapes && mesh.key) {
-            RawVector<float3> basis;
+            RawVector<mu::float3> basis;
             int bi = 0;
             each_key(&mesh, [&](const KeyBlock *kb) {
                 if (bi == 0) { // Basis
                     basis.resize_discard(kb->totelem);
-                    memcpy(basis.data(), kb->data, basis.size() * sizeof(float3));
+                    memcpy(basis.data(), kb->data, basis.size() * sizeof(mu::float3));
                 }
                 else {
                     auto bsd = dst.addBlendShape(kb->name);
@@ -589,7 +612,7 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
                     auto& frame = *bsd->frames.back();
                     frame.weight = 100.0f;
                     frame.points.resize_discard(kb->totelem);
-                    memcpy(frame.points.data(), kb->data, basis.size() * sizeof(float3));
+                    memcpy(frame.points.data(), kb->data, basis.size() * sizeof(mu::float3));
 
                     size_t len = frame.points.size();
                     for (size_t i = 0; i < len; ++i) {
@@ -632,14 +655,14 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
             num_indices = dst.indices.size();
 
             if (!dst.normals.empty() && m_settings.sync_normals == msbNormalSyncMode::PerIndex) {
-                dst.normals.resize(num_indices, float3::zero());
+                dst.normals.resize(num_indices, mu::float3::zero());
             }
             if (!dst.uv0.empty()) {
-                dst.uv0.resize(num_indices, float2::zero());
+                dst.uv0.resize(num_indices, mu::float2::zero());
             }
             if (!dst.colors.empty()) {
                 auto colors = bmesh.colors();
-                dst.colors.resize(num_indices, float4::one());
+                dst.colors.resize(num_indices, mu::float4::one());
                 for (size_t ii = lines_begin; ii < num_indices; ++ii) {
                     int vi = dst.indices[ii];
                     dst.colors[ii] = to_float4(colors[vi]);
@@ -650,7 +673,7 @@ void msbContext::doExtractNonEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data
 #endif
 }
 
-void msbContext::doExtractEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
+void msblenContext::doExtractEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
 {
     bl::BObject bobj(obj);
     bl::BMesh bmesh(data);
@@ -674,7 +697,7 @@ void msbContext::doExtractEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
     // vertices
     dst.points.resize_discard(num_vertices);
     for (size_t vi = 0; vi < num_vertices; ++vi) {
-        dst.points[vi] = (float3&)vertices[vi]->co;
+        dst.points[vi] = (mu::float3&)vertices[vi]->co;
     }
 
     // faces
@@ -726,22 +749,22 @@ void msbContext::doExtractEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data)
             for (size_t ti = 0; ti < num_triangles; ++ti) {
                 auto& triangle = triangles[ti];
                 for (auto *idx : triangle)
-                    dst.uv0[ii++] = *(float2*)((char*)idx->head.data + offset);
+                    dst.uv0[ii++] = *(mu::float2*)((char*)idx->head.data + offset);
             }
         }
     }
 }
 
-ms::TransformPtr msbContext::findBone(Object *armature, Bone *bone)
+ms::TransformPtr msblenContext::findBone(Object *armature, Bone *bone)
 {
     auto it = m_bones.find(bone);
     return it != m_bones.end() ? it->second : nullptr;
 }
 
-msbContext::ObjectRecord& msbContext::touchRecord(Object *obj, const std::string& base_path)
+msblenContext::ObjectRecord& msblenContext::touchRecord(Object *obj, const std::string& base_path, bool children)
 {
     auto& rec = m_obj_records[obj];
-    if (rec.touched)
+    if (rec.touched && base_path.empty())
         return rec; // already touched
 
     rec.touched = true;
@@ -764,19 +787,24 @@ msbContext::ObjectRecord& msbContext::touchRecord(Object *obj, const std::string
 
     // trace dupli group
     if (auto group = get_instance_collection(obj)) {
-        auto local_path = std::string("/") + (group->id.name + 2);
-        auto group_path = base_path + local_path;
+        auto group_path = path + '/' + (group->id.name + 2);
         m_entity_manager.touch(group_path);
 
         auto gobjects = bl::list_range((CollectionObject*)group->gobject.first);
-        for (auto go : gobjects) {
-            touchRecord(obj, group_path);
-        }
+        for (auto go : gobjects)
+            touchRecord(go->ob, group_path, true);
+    }
+
+    // care children
+    if (children) {
+        each_child(obj, [&](Object *child) {
+            touchRecord(child, path, true);
+        });
     }
     return rec;
 }
 
-void msbContext::eraseStaleObjects()
+void msblenContext::eraseStaleObjects()
 {
     for (auto i = m_obj_records.begin(); i != m_obj_records.end(); /**/) {
         if (!i->second.touched)
@@ -788,12 +816,282 @@ void msbContext::eraseStaleObjects()
 }
 
 
-void msbContext::sendAnimations(SendScope scope)
+void msblenContext::exportAnimation(Object *obj, bool force, const std::string base_path)
 {
-    // wait previous request to complete
-    m_sender.wait();
+    if (!obj)
+        return;
 
-    m_sending_animations = true;
+    auto path = base_path + get_path(obj);
+    if (m_anim_records.find(path) != m_anim_records.end())
+        return;
+
+    auto& clip = m_animations.front();
+    ms::TransformAnimationPtr dst;
+    AnimationRecord::extractor_t extractor = nullptr;
+    auto group = get_instance_collection(obj);
+
+    auto add_animation = [this, &clip](const std::string& path, void *obj, ms::TransformAnimationPtr dst, AnimationRecord::extractor_t extractor) {
+        dst->path = path;
+        auto& rec = m_anim_records[path];
+        rec.extractor = extractor;
+        rec.obj = obj;
+        rec.dst = dst;
+        clip->addAnimation(dst);
+    };
+
+    switch (obj->type) {
+    case OB_CAMERA:
+    {
+        // camera
+        exportAnimation(obj->parent, true, base_path);
+        add_animation(path, obj, ms::CameraAnimation::create(), &msblenContext::extractCameraAnimationData);
+        break;
+    }
+    case OB_LAMP:
+    {
+        // lights
+        exportAnimation(obj->parent, true, base_path);
+        add_animation(path, obj, ms::LightAnimation::create(), &msblenContext::extractLightAnimationData);
+        break;
+    }
+    case OB_MESH:
+    {
+        // meshes
+        exportAnimation(obj->parent, true, base_path);
+        add_animation(path, obj, ms::MeshAnimation::create(), &msblenContext::extractMeshAnimationData);
+        break;
+    }
+    default:
+    if (force || obj->type == OB_ARMATURE || group) {
+        exportAnimation(obj->parent, true, base_path);
+        add_animation(path, obj, ms::TransformAnimation::create(), &msblenContext::extractTransformAnimationData);
+
+        if (obj->type == OB_ARMATURE && (!m_settings.bake_modifiers && m_settings.sync_bones)) {
+            // bones
+            auto poses = bl::list_range((bPoseChannel*)obj->pose->chanbase.first);
+            for (auto pose : poses) {
+                auto pose_path = base_path + get_path(obj, pose->bone);
+                add_animation(pose_path, pose, ms::TransformAnimation::create(), &msblenContext::extractPoseAnimationData);
+            }
+        }
+        break;
+    }
+    }
+
+    // handle dupli group
+    if (group) {
+        auto group_path = base_path;
+        group_path += '/';
+        group_path += get_name(obj);
+        group_path += '/';
+        group_path += (group->id.name + 2);
+
+        auto gobjects = bl::list_range((CollectionObject*)group->gobject.first);
+        for (auto go : gobjects) {
+            exportAnimation(go->ob, false, group_path);
+        }
+    }
+}
+
+void msblenContext::extractTransformAnimationData(ms::TransformAnimation& dst_, void *obj)
+{
+    auto& dst = (ms::TransformAnimation&)dst_;
+
+    mu::float3 pos;
+    mu::quatf rot;
+    mu::float3 scale;
+    bool vis;
+    ExtractTransformData((Object*)obj, pos, rot, scale, vis);
+
+    float t = m_anim_time;
+    dst.translation.push_back({ t, pos });
+    dst.rotation.push_back({ t, rot });
+    dst.scale.push_back({ t, scale });
+    dst.visible.push_back({ t, vis });
+}
+
+void msblenContext::extractPoseAnimationData(ms::TransformAnimation& dst_, void * obj)
+{
+    auto& dst = (ms::TransformAnimation&)dst_;
+
+    mu::float3 pos;
+    mu::quatf rot;
+    mu::float3 scale;
+    extract_local_TRS((bPoseChannel*)obj, pos, rot, scale);
+
+    float t = m_anim_time;
+    dst.translation.push_back({ t, pos });
+    dst.rotation.push_back({ t, rot });
+    dst.scale.push_back({ t, scale });
+}
+
+void msblenContext::extractCameraAnimationData(ms::TransformAnimation& dst_, void *obj)
+{
+    extractTransformAnimationData(dst_, obj);
+
+    auto& dst = (ms::CameraAnimation&)dst_;
+
+    bool ortho;
+    float near_plane, far_plane, fov, focal_length;
+    mu::float2 sensor_size, lens_shift;
+    ExtractCameraData((Object*)obj, ortho, near_plane, far_plane, fov, focal_length, sensor_size, lens_shift);
+
+    float t = m_anim_time;
+    dst.near_plane.push_back({ t , near_plane });
+    dst.far_plane.push_back({ t , far_plane });
+    dst.fov.push_back({ t , fov });
+    dst.focal_length.push_back({ t , focal_length });
+    dst.sensor_size.push_back({ t , sensor_size });
+    dst.lens_shift.push_back({ t , lens_shift });
+}
+
+void msblenContext::extractLightAnimationData(ms::TransformAnimation& dst_, void *obj)
+{
+    extractTransformAnimationData(dst_, obj);
+
+    auto& dst = (ms::LightAnimation&)dst_;
+
+    ms::Light::LightType type;
+    mu::float4 color;
+    float intensity, range, spot_angle;
+    ExtractLightData((Object*)obj, type, color, intensity, range, spot_angle);
+
+    float t = m_anim_time;
+    dst.color.push_back({ t, color });
+    dst.intensity.push_back({ t, intensity });
+    dst.range.push_back({ t, range });
+    if (type == ms::Light::LightType::Spot) {
+        dst.spot_angle.push_back({ t, spot_angle });
+    }
+}
+
+void msblenContext::extractMeshAnimationData(ms::TransformAnimation & dst_, void * obj)
+{
+    extractTransformAnimationData(dst_, obj);
+
+    auto& dst = (ms::MeshAnimation&)dst_;
+    float t = m_anim_time;
+
+    auto& mesh = *(Mesh*)((Object*)obj)->data;
+    if (!get_edit_mesh(&mesh) && mesh.key) {
+        // blendshape weight animation
+        int bi = 0;
+        each_key(&mesh, [&](const KeyBlock *kb) {
+            if (bi == 0) { // Basis
+            }
+            else {
+                dst.getBlendshapeCurve(kb->name).push_back({ t, kb->curval * 100.0f });
+            }
+            ++bi;
+        });
+    }
+}
+
+
+void msblenContext::logInfo(const char * format, ...)
+{
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    puts(buf);
+    va_end(args);
+}
+
+bool msblenContext::isServerAvailable()
+{
+    m_sender.client_settings = m_settings.client_settings;
+    return m_sender.isServerAvaileble();
+}
+
+const std::string& msblenContext::getErrorMessage()
+{
+    return m_sender.getErrorMessage();
+}
+
+void msblenContext::wait()
+{
+    m_sender.wait();
+}
+
+void msblenContext::clear()
+{
+    m_material_ids.clear();
+    m_texture_manager.clear();
+    m_material_manager.clear();
+    m_entity_manager.clear();
+}
+
+bool msblenContext::prepare()
+{
+    if (!bl::ready())
+        return false;
+    return true;
+}
+
+bool msblenContext::sendMaterials(bool dirty_all)
+{
+    if (!prepare() || m_sender.isSending() || m_ignore_events)
+        return false;
+
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(dirty_all);
+    exportMaterials();
+
+    // send
+    kickAsyncSend();
+    return true;
+}
+
+bool msblenContext::sendObjects(SendScope scope, bool dirty_all)
+{
+    if (!prepare() || m_sender.isSending() || m_ignore_events)
+        return false;
+
+    m_entity_manager.setAlwaysMarkDirty(dirty_all);
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(false); // false because too heavy
+
+    if (m_settings.sync_meshes)
+        exportMaterials();
+
+    if (scope == SendScope::All) {
+        auto scene = bl::BScene(bl::BContext::get().scene());
+        scene.each_objects([this](Object *obj) {
+            exportObject(obj, true);
+        });
+        eraseStaleObjects();
+    }
+    if (scope == SendScope::Updated) {
+        auto bpy_data = bl::BData(bl::BContext::get().data());
+        if (!bpy_data.objects_is_updated())
+            return true; // nothing to send
+
+        auto scene = bl::BScene(bl::BContext::get().scene());
+        scene.each_objects([this](Object *obj) {
+            auto bid = bl::BID(obj);
+            if (bid.is_updated() || bid.is_updated_data())
+                exportObject(obj, false);
+            else
+                touchRecord(obj);
+        });
+        eraseStaleObjects();
+    }
+    if (scope == SendScope::Selected) {
+    }
+
+    kickAsyncSend();
+    return true;
+}
+
+bool msblenContext::sendAnimations(SendScope scope)
+{
+    if (!prepare() || m_sender.isSending() || m_ignore_events)
+        return false;
+
+    m_ignore_events = true;
 
     auto scene = bl::BScene(bl::BContext::get().scene());
     m_animations.clear();
@@ -819,14 +1117,14 @@ void msbContext::sendAnimations(SendScope scope)
         float frame_to_seconds = 1.0f / scene.fps();
         int reserve_size = (frame_end - frame_start) / interval + 1;
 
-        for(auto& kvp : m_anim_records) {
+        for (auto& kvp : m_anim_records) {
             kvp.second.dst->reserve(reserve_size);
         };
         for (int f = frame_start;;) {
             scene.frame_set(f);
 
             m_anim_time = (f - frame_start) * frame_to_seconds * m_settings.animation_timescale;
-            mu::parallel_for_each(m_anim_records.begin(), m_anim_records.end(), [this](AnimationRecords::value_type& kvp) {
+            mu::parallel_for_each(m_anim_records.begin(), m_anim_records.end(), [this](auto& kvp) {
                 kvp.second(this);
             });
 
@@ -849,252 +1147,17 @@ void msbContext::sendAnimations(SendScope scope)
             std::remove_if(m_animations.begin(), m_animations.end(), [](ms::AnimationClipPtr& p) { return p->empty(); }),
             m_animations.end());
     }
+    m_ignore_events = false;
 
     // send
     if (!m_animations.empty()) {
         kickAsyncSend();
+        return true;
     }
-    m_sending_animations = false;
+    return false;
 }
 
-void msbContext::exportAnimation(Object *obj, bool force, const std::string base_path)
-{
-    if (!obj)
-        return;
-
-    auto path = base_path + get_path(obj);
-    if (m_anim_records.find(path) != m_anim_records.end())
-        return;
-
-    auto& clip = m_animations.front();
-    ms::AnimationPtr dst;
-    AnimationRecord::extractor_t extractor = nullptr;
-    auto group = get_instance_collection(obj);
-
-    auto add_animation = [this, &clip](const std::string& path, void *obj, ms::AnimationPtr dst, AnimationRecord::extractor_t extractor) {
-        dst->path = path;
-        auto& rec = m_anim_records[path];
-        rec.extractor = extractor;
-        rec.obj = obj;
-        rec.dst = dst.get();
-        clip->animations.push_back(dst);
-    };
-
-    switch (obj->type) {
-    case OB_CAMERA:
-    {
-        // camera
-        exportAnimation(obj->parent, true, base_path);
-        add_animation(path, obj, ms::CameraAnimation::create(), &msbContext::extractCameraAnimationData);
-        break;
-    }
-    case OB_LAMP:
-    {
-        // lights
-        exportAnimation(obj->parent, true, base_path);
-        add_animation(path, obj, ms::LightAnimation::create(), &msbContext::extractLightAnimationData);
-        break;
-    }
-    case OB_MESH:
-    {
-        // meshes
-        exportAnimation(obj->parent, true, base_path);
-        add_animation(path, obj, ms::MeshAnimation::create(), &msbContext::extractMeshAnimationData);
-        break;
-    }
-    default:
-    if (force || obj->type == OB_ARMATURE || group) {
-        exportAnimation(obj->parent, true, base_path);
-        add_animation(path, obj, ms::TransformAnimation::create(), &msbContext::extractTransformAnimationData);
-
-        if (obj->type == OB_ARMATURE) {
-            // bones
-            auto poses = bl::list_range((bPoseChannel*)obj->pose->chanbase.first);
-            for (auto pose : poses) {
-                auto pose_path = base_path + get_path(obj, pose->bone);
-                add_animation(pose_path, pose, ms::TransformAnimation::create(), &msbContext::extractPoseAnimationData);
-            }
-        }
-        break;
-    }
-    }
-
-    // handle dupli group
-    if (group) {
-        auto group_path = base_path;
-        group_path += '/';
-        group_path += get_name(obj);
-        group_path += '/';
-        group_path += (group->id.name + 2);
-
-        auto gobjects = bl::list_range((CollectionObject*)group->gobject.first);
-        for (auto go : gobjects) {
-            exportAnimation(go->ob, false, group_path);
-        }
-    }
-}
-
-void msbContext::extractTransformAnimationData(ms::Animation& dst_, void *obj)
-{
-    auto& dst = (ms::TransformAnimation&)dst_;
-
-    float3 pos;
-    quatf rot;
-    float3 scale;
-    bool vis;
-    extract_local_TRS((Object*)obj, pos, rot, scale);
-    vis = is_visible((Object*)obj);
-
-    float t = m_anim_time;
-    dst.translation.push_back({ t, pos });
-    dst.rotation.push_back({ t, rot });
-    dst.scale.push_back({ t, scale });
-    //dst.visible.push_back({ t, vis });
-}
-
-void msbContext::extractPoseAnimationData(ms::Animation& dst_, void * obj)
-{
-    auto& dst = (ms::TransformAnimation&)dst_;
-
-    float3 pos;
-    quatf rot;
-    float3 scale;
-    extract_local_TRS((bPoseChannel*)obj, pos, rot, scale);
-
-    float t = m_anim_time;
-    dst.translation.push_back({ t, pos });
-    dst.rotation.push_back({ t, rot });
-    dst.scale.push_back({ t, scale });
-}
-
-void msbContext::extractCameraAnimationData(ms::Animation& dst_, void *obj)
-{
-    extractTransformAnimationData(dst_, obj);
-
-    auto& dst = (ms::CameraAnimation&)dst_;
-    {
-        auto& last = dst.rotation.back();
-        last.value *= rotateX(90.0f * Deg2Rad);
-    }
-
-    bool ortho;
-    float near_plane, far_plane, fov;
-    ExtractCameraData((Object*)obj, ortho, near_plane, far_plane, fov);
-
-    float t = m_anim_time;
-    dst.near_plane.push_back({ t , near_plane });
-    dst.far_plane.push_back({ t , far_plane });
-    dst.fov.push_back({ t , fov });
-}
-
-void msbContext::extractLightAnimationData(ms::Animation& dst_, void *obj)
-{
-    extractTransformAnimationData(dst_, obj);
-
-    auto& dst = (ms::LightAnimation&)dst_;
-    {
-        auto& last = dst.rotation.back();
-        last.value *= rotateX(90.0f * Deg2Rad);
-    }
-
-    ms::Light::LightType type;
-    float4 color;
-    float intensity, range, spot_angle;
-    ExtractLightData((Object*)obj, type, color, intensity, range, spot_angle);
-
-    float t = m_anim_time;
-    dst.color.push_back({ t, color });
-    dst.intensity.push_back({ t, intensity });
-    dst.range.push_back({ t, range });
-    if (type == ms::Light::LightType::Spot) {
-        dst.spot_angle.push_back({ t, spot_angle });
-    }
-}
-
-void msbContext::extractMeshAnimationData(ms::Animation & dst_, void * obj)
-{
-    extractTransformAnimationData(dst_, obj);
-
-    auto& dst = (ms::MeshAnimation&)dst_;
-    float t = m_anim_time;
-
-    auto& mesh = *(Mesh*)((Object*)obj)->data;
-    if (!get_edit_mesh(&mesh) && mesh.key) {
-        // blendshape weight animation
-        int bi = 0;
-        each_key(&mesh, [&](const KeyBlock *kb) {
-            if (bi == 0) { // Basis
-            }
-            else {
-                auto bsa = dst.findOrCreateBlendshapeAnimation(kb->name);
-                bsa->weight.push_back({ t, kb->curval * 100.0f });
-            }
-            ++bi;
-        });
-    }
-}
-
-
-
-void msbContext::clear()
-{
-    m_material_ids.clear();
-    m_texture_manager.clear();
-    m_material_manager.clear();
-    m_entity_manager.clear();
-}
-
-bool msbContext::prepare()
-{
-    if (!bl::ready() || m_sender.isSending())
-        return false;
-
-    return true;
-}
-
-void msbContext::sendScene(SendScope scope, bool force_all)
-{
-    if (m_sending_animations || !prepare())
-        return;
-
-    if (force_all) {
-        m_material_manager.makeDirtyAll();
-        m_entity_manager.makeDirtyAll();
-    }
-
-    if (m_settings.sync_meshes)
-        exportMaterials();
-
-    if (scope == SendScope::Updated) {
-        auto bpy_data = bl::BData(bl::BContext::get().data());
-        if (!bpy_data.objects_is_updated())
-            return; // nothing to send
-
-        auto scene = bl::BScene(bl::BContext::get().scene());
-        scene.each_objects([this](Object *obj) {
-            auto bid = bl::BID(obj);
-            if (bid.is_updated() || bid.is_updated_data())
-                exportObject(obj, false);
-            else
-                touchRecord(obj);
-        });
-    }
-    if (scope == SendScope::Selected) {
-        // todo
-    }
-    else {
-        // all
-        auto scene = bl::BScene(bl::BContext::get().scene());
-        scene.each_objects([this](Object *obj) {
-            exportObject(obj, false);
-        });
-    }
-
-    eraseStaleObjects();
-    kickAsyncSend();
-}
-
-void msbContext::flushPendingList()
+void msblenContext::flushPendingList()
 {
     if (!m_pending.empty() && !m_sender.isSending()) {
         for (auto p : m_pending)
@@ -1104,7 +1167,7 @@ void msbContext::flushPendingList()
     }
 }
 
-void msbContext::kickAsyncSend()
+void msblenContext::kickAsyncSend()
 {
     for (auto& t : m_async_tasks)
         t.wait();
@@ -1129,7 +1192,6 @@ void msbContext::kickAsyncSend()
         t.scene_settings = m_settings.scene_settings;
         float scale_factor = 1.0f / m_settings.scene_settings.scale_factor;
         t.scene_settings.scale_factor = 1.0f;
-        t.scene_settings.handedness = ms::Handedness::Left;
 
         t.textures = m_texture_manager.getDirtyTextures();
         t.materials = m_material_manager.getDirtyMaterials();

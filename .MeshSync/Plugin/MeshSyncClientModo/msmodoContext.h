@@ -37,7 +37,7 @@ struct msmodoSettings
 
     float scale_factor = 1.0f;
     float animation_time_scale = 1.0f;
-    float animation_sps = 2.0f;
+    float animation_sps = 3.0f;
     int  timeout_ms = 5000;
     bool auto_sync = false;
     bool sync_meshes = true;
@@ -66,7 +66,14 @@ class msmodoContext : private msmodoInterface
 {
 using super = msmodoInterface;
 public:
-    enum class SendScope
+    enum class SendTarget : int
+    {
+        Objects,
+        Materials,
+        Animations,
+        Everything,
+    };
+    enum class SendScope : int
     {
         None,
         All,
@@ -75,19 +82,25 @@ public:
     };
 
     static msmodoContext& getInstance();
+    static void finalizeInstance();
 
     msmodoContext();
     ~msmodoContext();
 
     msmodoSettings& getSettings();
 
+    using super::logInfo;
+    using super::logError;
+    bool isServerAvailable();
+    const std::string& getErrorMessage();
+
     void wait();
     void update();
     bool sendMaterials(bool dirty_all);
-    bool sendScene(SendScope scope, bool dirty_all);
+    bool sendObjects(SendScope scope, bool dirty_all);
     bool sendAnimations(SendScope scope);
 
-    bool recvScene();
+    bool recvObjects();
 
     void onItemAdd(CLxUser_Item& item) override;
     void onItemRemove(CLxUser_Item& item) override;
@@ -111,8 +124,8 @@ private:
         bool dirty = true;
 
         ms::TransformPtr dst_obj;
-        ms::AnimationPtr dst_anim;
-        std::map<std::string, ms::AnimationPtr> dst_anim_replicas;
+        ms::TransformAnimationPtr dst_anim;
+        std::map<std::string, ms::TransformAnimationPtr> dst_anim_replicas;
 
         RawVector<LXtID4> face_types;
         RawVector<const char*> material_names; // mesh: per-face material names.
@@ -123,8 +136,6 @@ private:
         void clearState();
         void doExtractAnimation(msmodoContext *self);
 
-        void resolveMesh(msmodoContext *self);
-        void resolveReplicas(msmodoContext *self);
         void eraseFromEntityManager(msmodoContext *self);
     };
 
@@ -154,7 +165,7 @@ private:
 
     void extractTransformData(TreeNode& n, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis);
     void extractCameraData(TreeNode& n, bool& ortho, float& near_plane, float& far_plane, float& fov,
-        float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance);
+        float& focal_length, mu::float2& sensor_size, mu::float2& lens_shift);
     void extractLightData(TreeNode& n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& range, float& spot_angle);
     void extractReplicaData(TreeNode& n, CLxUser_Item& geom, int nth, const mu::float4x4& matrix,
         std::string& path, mu::float3& pos, mu::quatf& rot, mu::float3& scale);
@@ -173,10 +184,12 @@ private:
     std::map<LxItemKey, TreeNode> m_tree_nodes;
     std::vector<TreeNode*> m_anim_nodes;
     std::vector<ms::AnimationClipPtr> m_animations;
+    std::vector<std::function<void()>> m_parallel_tasks;
     SendScope m_pending_scope = SendScope::None;
     bool m_ignore_events = false;
     float m_anim_time = 0.0f;
 };
 
-#define msmodoGetInstance() msmodoContext::getInstance()
-#define msmodoGetSettings() msmodoGetInstance().getSettings()
+#define msmodoGetContext() msmodoContext::getInstance()
+#define msmodoGetSettings() msmodoGetContext().getSettings()
+bool msmodoExport(msmodoContext::SendTarget target, msmodoContext::SendScope scope);

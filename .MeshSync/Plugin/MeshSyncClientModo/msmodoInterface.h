@@ -1,4 +1,5 @@
 #pragma once
+#include "msmodoUtils.h"
 
 class msmodoEventListener;
 class msmodoTimerCallbackVisitor;
@@ -9,7 +10,7 @@ public:
     msmodoInterface();
     virtual ~msmodoInterface();
 
-    virtual void prepare();
+    virtual bool prepare();
     void startTimer();
 
     // events
@@ -19,6 +20,9 @@ public:
     virtual void onTreeRestructure();
     virtual void onTimeChange();
     virtual void onIdle();
+
+    void logInfo(const char *format, ...);
+    void logError(const char *format, ...);
 
     // time: inf -> current time
     void setChannelReadTime(double time = std::numeric_limits<double>::infinity());
@@ -56,7 +60,7 @@ public:
     void dbgDumpItem(CLxUser_Item item);
 
 public:
-    LXtItemType tMaterial = 0,
+    LXtItemType tMaterial = 0, tMask,
                 tLocator, tCamera, tLight, tMesh, tMeshInst, tReplicator,
                 tLightMaterial, tPointLight, tDirectionalLight, tSpotLight, tAreaLight,
                 tDeform, tGenInf, tMorph,
@@ -70,6 +74,8 @@ public:
     CLxUser_ListenerService  m_svc_listener;
     CLxUser_LogService       m_svc_log;
     CLxUser_PlatformService  m_svc_platform;
+    CLxUser_Log              m_master_log;
+    CLxUser_LogEntry         m_log_entry;
 
     CLxUser_Scene m_current_scene;
     CLxUser_ChannelRead m_ch_read;

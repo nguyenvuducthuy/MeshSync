@@ -3,17 +3,49 @@
 #include "MeshSync/MeshSync.h"
 #include "MeshSync/MeshSyncUtils.h"
 
-class msmbDevice : public FBDevice
+struct msmobuSettings
 {
-FBDeviceDeclare(msmbDevice, FBDevice);
+    ms::ClientSettings client_settings;
+    int  timeout_ms = 5000;
+    float scale_factor = 100.0f;
+    float animation_time_scale = 1.0f;
+    float animation_sps = 3.0f;
+
+    bool auto_sync = false;
+    bool sync_cameras = true;
+    bool sync_lights = true;
+    bool sync_bones = true;
+    bool sync_blendshapes = true;
+    bool sync_meshes = true;
+    bool sync_textures = true;
+    bool make_double_sided = false;
+    bool bake_deformars = false;
+    bool keyframe_reduction = true;
+    bool keep_flat_curves = false;
+    bool parallel_extraction = true;
+};
+
+class msmobuDevice : public FBDevice
+{
+FBDeviceDeclare(msmobuDevice, FBDevice);
 public:
     bool FBCreate() override;
     void FBDestroy() override;
-
     bool DeviceOperation(kDeviceOperations pOperation) override;
     void DeviceTransportNotify(kTransportMode pMode, FBTime pTime, FBTime pSystem) override;
 
-    bool sendScene(bool force_all);
+    msmobuSettings& getSettings();
+
+    void logInfo(const char *format, ...);
+    void logError(const char *format, ...);
+    bool isServerAvailable();
+    const std::string& getErrorMessage();
+
+    void wait();
+    void update();
+
+    bool sendMaterials(bool dirty_all);
+    bool sendObjects(bool dirty_all);
     bool sendAnimations();
 
 private:
@@ -48,13 +80,13 @@ private:
 
     struct AnimationRecord : public mu::noncopyable
     {
-        using extractor_t = void (msmbDevice::*)(ms::Animation& dst, FBModel *src);
+        using extractor_t = void (msmobuDevice::*)(ms::TransformAnimation& dst, FBModel *src);
 
-        ms::Animation *dst = nullptr;
+        ms::TransformAnimationPtr dst;
         FBModel *src = nullptr;
         extractor_t extractor = nullptr;
 
-        void operator()(msmbDevice *_this);
+        void operator()(msmobuDevice *_this);
     };
     using AnimationRecords = std::map<FBModel*, AnimationRecord>;
 
@@ -64,15 +96,14 @@ private:
     void onRender(HIRegister pCaller, HKEventBase pEvent);
     void onSynchronization(HIRegister pCaller, HKEventBase pEvent);
 
-    void update();
     void kickAsyncSend();
 
-    ms::TransformPtr exportObject(FBModel* src, bool force);
+    ms::TransformPtr exportObject(FBModel* src, bool parent, bool tip = true);
     template<class T> std::shared_ptr<T> createEntity(NodeRecord& n);
-    ms::TransformPtr exporttTransform(NodeRecord& n);
+    ms::TransformPtr exportTransform(NodeRecord& n);
     ms::CameraPtr exportCamera(NodeRecord& n);
     ms::LightPtr exportLight(NodeRecord& n);
-    ms::MeshPtr exportMeshSimple(NodeRecord& n);
+    ms::MeshPtr exportBlendshapeWeights(NodeRecord& n);
     ms::MeshPtr exportMesh(NodeRecord& n);
     void doExtractMesh(ms::Mesh& dst, FBModel* src);
 
@@ -82,12 +113,13 @@ private:
 
     bool exportAnimations();
     bool exportAnimation(FBModel* src, bool force);
-    void extractTransformAnimation(ms::Animation& dst, FBModel* src);
-    void extractCameraAnimation(ms::Animation& dst, FBModel* src);
-    void extractLightAnimation(ms::Animation& dst, FBModel* src);
-    void extractMeshAnimation(ms::Animation& dst, FBModel* src);
+    void extractTransformAnimation(ms::TransformAnimation& dst, FBModel* src);
+    void extractCameraAnimation(ms::TransformAnimation& dst, FBModel* src);
+    void extractLightAnimation(ms::TransformAnimation& dst, FBModel* src);
+    void extractMeshAnimation(ms::TransformAnimation& dst, FBModel* src);
 
 private:
+    msmobuSettings m_settings;
     bool m_data_updated = false;
     bool m_dirty_meshes = true;
     bool m_dirty_textures = true;
@@ -110,23 +142,4 @@ private:
     ms::MaterialManager m_material_manager;
     ms::EntityManager m_entity_manager;
     ms::AsyncSceneSender m_sender;
-
-public:
-    ms::ClientSettings client_settings;
-    int  timeout_ms = 5000;
-    float scale_factor = 100.0f;
-    float animation_time_scale = 1.0f;
-    float animation_sps = 3.0f;
-
-    bool auto_sync = false;
-    bool sync_cameras = true;
-    bool sync_lights = true;
-    bool sync_bones = true;
-    bool sync_meshes = true;
-    bool sync_textures = true;
-    bool make_double_sided = false;
-    bool bake_deformars = false;
-    bool keyframe_reduction = true;
-    bool keep_flat_curves = false;
-    bool parallel_extraction = true;
 };

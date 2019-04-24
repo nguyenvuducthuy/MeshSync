@@ -1,18 +1,15 @@
 #include "pch.h"
-#include "MeshSyncClientBlender.h"
-#include "msbUtils.h"
-#include "msbBinder.h"
-using namespace mu;
+#include "msblenContext.h"
+#include "msblenUtils.h"
+#include "msblenBinder.h"
 
 
-
-
-std::string get_name(const Object * obj)
+std::string get_name(const Object *obj)
 {
     return obj ? std::string(obj->id.name + 2) : "";
 }
 
-std::string get_name(const Bone * obj)
+std::string get_name(const Bone *obj)
 {
     return obj ? std::string(obj->name) : "";
 }
@@ -91,19 +88,19 @@ bPoseChannel* find_pose(Object *obj, const char *name)
 {
     if (!obj || !obj->pose) { return nullptr; }
     for (auto *it = (bPoseChannel*)obj->pose->chanbase.first; it != nullptr; it = it->next)
-        if (strcmp(it->name, name) == 0)
+        if (std::strcmp(it->name, name) == 0)
             return it;
     return nullptr;
 }
 
 
-static const float4x4 g_arm_to_world = float4x4{
+static const mu::float4x4 g_arm_to_world = mu::float4x4{
     1, 0, 0, 0,
     0, 0,-1, 0,
     0, 1, 0, 0,
     0, 0, 0, 1
 };
-static const float4x4 g_world_to_arm = float4x4{
+static const mu::float4x4 g_world_to_arm = mu::float4x4{
     1, 0, 0, 0,
     0, 0, 1, 0,
     0,-1, 0, 0,
@@ -111,57 +108,60 @@ static const float4x4 g_world_to_arm = float4x4{
 };
 
 
-void extract_local_TRS(const Object *obj, float3& t, quatf& r, float3& s)
+void extract_local_TRS(const Object *obj, mu::float3& t, mu::quatf& r, mu::float3& s)
 {
-    float4x4 local = bl::BObject(obj).matrix_local();
+    mu::float4x4 local = bl::BObject(obj).matrix_local();
     if (auto parent = obj->parent) {
         if (obj->partype == PARBONE) {
             if (auto bone = find_bone(obj->parent, obj->parsubstr)) {
                 auto arm_obj = obj->parent;
 
-                local *= translate(float3{ 0.0f, length((float3&)bone->tail - (float3&)bone->head), 0.0f });
+                local *= mu::translate(mu::float3{ 0.0f, mu::length((mu::float3&)bone->tail - (mu::float3&)bone->head), 0.0f });
                 local *= g_world_to_arm;
             }
         }
     }
 
-    t = swap_yz(extract_position(local));
-    r = swap_yz(extract_rotation(local));
-    s = swap_yz(extract_scale(local));
+    t = mu::extract_position(local);
+    r = mu::extract_rotation(local);
+    s = mu::extract_scale(local);
 }
 
 
 // bone
-void extract_local_TRS(const Bone *bone, float3& t, quatf& r, float3& s)
+void extract_local_TRS(const Bone *bone, mu::float3& t, mu::quatf& r, mu::float3& s)
 {
-    float4x4 local = (float4x4&)bone->arm_mat;
+    mu::float4x4 local = (mu::float4x4&)bone->arm_mat;
     if (auto parent = bone->parent)
-        local *= invert((float4x4&)parent->arm_mat);
+        local *= mu::invert((mu::float4x4&)parent->arm_mat);
     else
         local *= g_arm_to_world;
 
-    t = flip_z(extract_position(local));
-    r = flip_z(extract_rotation(local));
-    s = extract_scale(local);
+    // armature-space to world-space
+    t = mu::swap_yz(mu::flip_z(mu::extract_position(local)));
+    r = mu::swap_yz(mu::flip_z(mu::extract_rotation(local)));
+    s = mu::swap_yz(mu::extract_scale(local));
 }
 
 // pose
-void extract_local_TRS(const bPoseChannel *pose, float3& t, quatf& r, float3& s)
+void extract_local_TRS(const bPoseChannel *pose, mu::float3& t, mu::quatf& r, mu::float3& s)
 {
-    float4x4 local = (float4x4&)pose->pose_mat;
+    mu::float4x4 local = (mu::float4x4&)pose->pose_mat;
     if (auto parent = pose->parent)
-        local *= invert((float4x4&)parent->pose_mat);
+        local *= mu::invert((mu::float4x4&)parent->pose_mat);
     else
         local *= g_arm_to_world;
 
-    t = flip_z(extract_position(local));
-    r = flip_z(extract_rotation(local));
-    s = extract_scale(local);
+    // armature-space to world-space
+    t = mu::swap_yz(mu::flip_z(mu::extract_position(local)));
+    r = mu::swap_yz(mu::flip_z(mu::extract_rotation(local)));
+    s = mu::swap_yz(mu::extract_scale(local));
 }
 
-float4x4 extract_bindpose(const Bone *bone)
+mu::float4x4 extract_bindpose(const Bone *bone)
 {
-    auto mat_bone = (float4x4&)bone->arm_mat * g_arm_to_world;
-    return invert(flip_z(mat_bone));
+    auto mat_bone = (mu::float4x4&)bone->arm_mat * g_arm_to_world;
+    // armature-space to world-space
+    return mu::invert(mu::swap_yz(mu::flip_z(mat_bone)));
 }
 

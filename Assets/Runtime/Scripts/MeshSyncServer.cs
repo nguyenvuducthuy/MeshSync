@@ -43,6 +43,7 @@ namespace UTJ.MeshSync
         [Serializable]
         public class EntityRecord
         {
+            public EntityType dataType;
             public int index;
             public GameObject go;
             public Mesh origMesh;
@@ -164,7 +165,7 @@ namespace UTJ.MeshSync
 
 
         #region Fields
-        [SerializeField] int m_serverPort = 8080;
+        [SerializeField] int m_serverPort = ServerSettings.defaultPort;
         [SerializeField] DataPath m_assetDir = new DataPath(DataPath.Root.DataPath, "MeshSyncAssets");
         [SerializeField] Transform m_rootObject;
         [Space(10)]
@@ -188,6 +189,7 @@ namespace UTJ.MeshSync
         [HideInInspector] [SerializeField] List<TextureHolder> m_textureList = new List<TextureHolder>();
         [HideInInspector] [SerializeField] List<AudioHolder> m_audioList = new List<AudioHolder>();
 
+        ServerSettings m_serverSettings = ServerSettings.defaultValue;
         Server m_server;
         Server.MessageHandler m_handler;
         bool m_requestRestartServer = false;
@@ -209,7 +211,8 @@ namespace UTJ.MeshSync
 
 
         #region Properties
-        public static string version { get { return Server.version; } }
+        public static int pluginVersion { get { return Server.pluginVersion; } }
+        public static int protocolVersion { get { return Server.protocolVersion; } }
         public int serverPort
         {
             get { return m_serverPort; }
@@ -290,15 +293,20 @@ namespace UTJ.MeshSync
         {
             StopServer();
 
-            var settings = ServerSettings.defaultValue;
-            settings.port = (ushort)m_serverPort;
-            m_server = Server.Start(ref settings);
+            m_serverSettings.port = (ushort)m_serverPort;
+            m_server = Server.Start(ref m_serverSettings);
             m_server.fileRootPath = httpFileRootPath;
             m_handler = OnServerMessage;
 #if UNITY_EDITOR
             EditorApplication.update += PollServerEvents;
+#if UNITY_2019_1_OR_NEWER
+            SceneView.duringSceneGui += OnSceneViewGUI;
+#else
             SceneView.onSceneGUIDelegate += OnSceneViewGUI;
 #endif
+#endif
+            if (m_logging)
+                Debug.Log("MeshSync: server started (port: " + m_serverSettings.port + ")");
         }
 
         void StopServer()
@@ -307,10 +315,17 @@ namespace UTJ.MeshSync
             {
 #if UNITY_EDITOR
                 EditorApplication.update -= PollServerEvents;
+#if UNITY_2019_1_OR_NEWER
+                SceneView.duringSceneGui -= OnSceneViewGUI;
+#else
                 SceneView.onSceneGUIDelegate -= OnSceneViewGUI;
+#endif
 #endif
                 m_server.Stop();
                 m_server = default(Server);
+
+                if (m_logging)
+                    Debug.Log("MeshSync: server stopped (port: " + m_serverSettings.port + ")");
             }
         }
 
@@ -440,7 +455,7 @@ namespace UTJ.MeshSync
                     {
                         dstrec.materialIDs = srcrec.materialIDs;
                         dstrec.submeshCounts = srcrec.submeshCounts;
-                        UpdateReference(dstrec.go, srcrec.go);
+                        UpdateReference(dstrec, srcrec);
                     }
                 }
 
@@ -534,8 +549,10 @@ namespace UTJ.MeshSync
                                 break;
                         }
                     }
+#if UNITY_EDITOR
                     if (save)
                         AssetDatabase.SaveAssets();
+#endif
                 }
             });
 
@@ -547,21 +564,21 @@ namespace UTJ.MeshSync
                 {
                     Component dst = null;
                     var src = scene.GetEntity(i);
-                    switch (src.type)
+                    switch (src.entityType)
                     {
-                        case TransformData.Type.Transform:
+                        case EntityType.Transform:
                             dst = UpdateTransform(src);
                             break;
-                        case TransformData.Type.Camera:
+                        case EntityType.Camera:
                             dst = UpdateCamera((CameraData)src);
                             break;
-                        case TransformData.Type.Light:
+                        case EntityType.Light:
                             dst = UpdateLight((LightData)src);
                             break;
-                        case TransformData.Type.Mesh:
+                        case EntityType.Mesh:
                             dst = UpdateMesh((MeshData)src);
                             break;
-                        case TransformData.Type.Points:
+                        case EntityType.Points:
                             dst = UpdatePoints((PointsData)src);
                             break;
                     }
@@ -603,7 +620,13 @@ namespace UTJ.MeshSync
         {
             switch (data.queryType)
             {
-                case QueryMessage.QueryType.ClientName:
+                case QueryMessage.QueryType.PluginVersion:
+                    data.AddResponseText(MeshSyncServer.pluginVersion.ToString());
+                    break;
+                case QueryMessage.QueryType.ProtocolVersion:
+                    data.AddResponseText(MeshSyncServer.protocolVersion.ToString());
+                    break;
+                case QueryMessage.QueryType.HostName:
                     data.AddResponseText("Unity " + Application.unityVersion);
                     break;
                 case QueryMessage.QueryType.RootNodes:
@@ -822,7 +845,13 @@ namespace UTJ.MeshSync
 
         static Material CreateDefaultMaterial()
         {
-            var ret = new Material(Shader.Find("Standard"));
+            // prefer non Standard shader because it will be pink in HDRP
+            var shader = Shader.Find("HDRP/Lit");
+            if (shader == null)
+                shader = Shader.Find("LWRP/Lit");
+            if (shader == null)
+                shader = Shader.Find("Standard");
+            var ret = new Material(shader);
             return ret;
         }
 
@@ -1073,10 +1102,16 @@ namespace UTJ.MeshSync
 #endif
             if (dst.material == null)
             {
-                var shader = Shader.Find(src.shader);
-                if (shader == null)
-                    shader = Shader.Find("Standard");
-                dst.material = new Material(shader);
+                // prefer non Standard shader because it will be pink in HDRP
+                var shaderName = src.shader;
+                if (shaderName != "Standard")
+                {
+                    var shader = Shader.Find(src.shader);
+                    if (shader != null)
+                        dst.material = new Material(shader);
+                }
+                if (dst.material == null)
+                    dst.material = CreateDefaultMaterial();
                 dst.material.name = materialName;
 
                 dst.materialIID = dst.material.GetInstanceID();
@@ -1257,6 +1292,10 @@ namespace UTJ.MeshSync
                 var smr = GetOrAddSkinnedMeshRenderer(t.gameObject, si > 0);
                 if (smr != null)
                 {
+                    // disable GameObject while updating mesh and materials
+                    bool active = t.gameObject.activeSelf;
+                    t.gameObject.SetActive(false);
+
                     if (flags.hasIndices)
                     {
                         var collider = t.GetComponent<MeshCollider>();
@@ -1266,6 +1305,8 @@ namespace UTJ.MeshSync
                         {
                             var old = smr.sharedMesh;
                             smr.sharedMesh = null;
+                            smr.bones = null;
+                            smr.rootBone = null;
                             DestroyIfNotAsset(old);
                             old = null;
                         }
@@ -1298,12 +1339,6 @@ namespace UTJ.MeshSync
                         }
                         else
                         {
-                            if (smr.rootBone != null)
-                            {
-                                smr.bones = null;
-                                smr.rootBone = null;
-                            }
-
                             if (rec.editMesh != null)
                                 smr.localBounds = rec.editMesh.bounds;
                         }
@@ -1312,15 +1347,17 @@ namespace UTJ.MeshSync
                         smr.updateWhenOffscreen = updateWhenOffscreen;
                     }
 
-                    if (flags.hasBlendshapeWeights)
+                    if (flags.hasBlendshapeWeights && rec.editMesh != null)
                     {
-                        int numBlendShapes = data.numBlendShapes;
+                        int numBlendShapes = Math.Min(data.numBlendShapes, rec.editMesh.blendShapeCount);
                         for (int bi = 0; bi < numBlendShapes; ++bi)
                         {
                             var bsd = data.GetBlendShapeData(bi);
                             smr.SetBlendShapeWeight(bi, bsd.weight);
                         }
                     }
+
+                    t.gameObject.SetActive(active);
                 }
 
                 var renderer = trans.gameObject.GetComponent<Renderer>();
@@ -1398,20 +1435,25 @@ namespace UTJ.MeshSync
             if (flags.hasBones)
             {
                 mesh.bindposes = data.bindposes;
+                if (m_serverSettings.meshMaxBoneInfluence == 4)
+                {
+                    var tmpWeights4 = new PinnedList<BoneWeight>();
+                    tmpWeights4.Resize(split.numPoints);
+                    data.ReadBoneWeights4(tmpWeights4, split);
+                    mesh.boneWeights = tmpWeights4.Array;
+                    tmpWeights4.Dispose();
+                }
 #if UNITY_2019_1_OR_NEWER
-                var bonesPerVertex = new NativeArray<byte>(split.numPoints, Allocator.Temp);
-                var weights = new NativeArray<BoneWeight1>(split.numBoneWeights, Allocator.Temp);
-                data.ReadBoneCounts(Misc.ForceGetPointer(ref bonesPerVertex), split);
-                data.ReadBoneWeightsV(Misc.ForceGetPointer(ref weights), split);
-                mesh.SetBoneWeights(bonesPerVertex, weights);
-                bonesPerVertex.Dispose();
-                weights.Dispose();
-#else
-                var tmpWeights4 = new PinnedList<BoneWeight>();
-                tmpWeights4.Resize(split.numPoints);
-                data.ReadBoneWeights4(tmpWeights4, split);
-                mesh.boneWeights = tmpWeights4.Array;
-                tmpWeights4.Dispose();
+                else if(m_serverSettings.meshMaxBoneInfluence == -1)
+                {
+                    var bonesPerVertex = new NativeArray<byte>(split.numPoints, Allocator.Temp);
+                    var weights = new NativeArray<BoneWeight1>(split.numBoneWeights, Allocator.Temp);
+                    data.ReadBoneCounts(Misc.ForceGetPointer(ref bonesPerVertex), split);
+                    data.ReadBoneWeightsV(Misc.ForceGetPointer(ref weights), split);
+                    mesh.SetBoneWeights(bonesPerVertex, weights);
+                    bonesPerVertex.Dispose();
+                    weights.Dispose();
+                }
 #endif
             }
             if (flags.hasIndices)
@@ -1584,6 +1626,7 @@ namespace UTJ.MeshSync
             rec.index = data.index;
             var reference = data.reference;
             rec.reference = reference != "" ? reference : null;
+            rec.dataType = data.entityType;
 
             // sync TRS
             if (m_syncTransform)
@@ -1623,9 +1666,24 @@ namespace UTJ.MeshSync
             var cam = Misc.GetOrAddComponent<Camera>(trans.gameObject);
             cam.orthographic = data.orthographic;
 
-            float fov = data.fov;
-            if (fov > 0.0f)
-                cam.fieldOfView = fov;
+            // use physical camera params if available
+            float focalLength = data.focalLength;
+            if (focalLength > 0.0f)
+            {
+                cam.usePhysicalProperties = true;
+                cam.focalLength = focalLength;
+
+                var sensorSize = data.sensorSize;
+                if (sensorSize.x > 0.0f && sensorSize.y > 0.0f)
+                    cam.sensorSize = sensorSize;
+                cam.lensShift = data.lensShift;
+            }
+            else
+            {
+                float fov = data.fov;
+                if (fov > 0.0f)
+                    cam.fieldOfView = fov;
+            }
 
             float nearClipPlane = data.nearClipPlane;
             float farClipPlane = data.farClipPlane;
@@ -1659,44 +1717,110 @@ namespace UTJ.MeshSync
             return lt;
         }
 
-        void UpdateReference(GameObject dstgo, GameObject srcgo)
+        void UpdateReference(EntityRecord dst, EntityRecord src)
         {
-            var srcsmr = srcgo.GetComponent<SkinnedMeshRenderer>();
-            if (srcsmr != null)
+            if (src.dataType == EntityType.Unknown)
             {
-                var dstpr = dstgo.GetComponent<PointCacheRenderer>();
-                if (dstpr != null)
-                {
-                    dstpr.sharedMesh = srcsmr.sharedMesh;
+                Debug.LogError("MeshSync: should not be here!");
+                return;
+            }
 
-                    var materials = srcsmr.sharedMaterials;
+            var dstgo = dst.go;
+            var srcgo = src.go;
+
+            // should copy 'enabled'...?
+            if (src.dataType == EntityType.Camera)
+            {
+                var srccam = srcgo.GetComponent<Camera>();
+                if (srccam != null)
+                {
+                    var dstcam  = Misc.GetOrAddComponent<Camera>(dstgo);
+                    dstcam.orthographic = srccam.orthographic;
+                    dstcam.fieldOfView = srccam.fieldOfView;
+                    dstcam.nearClipPlane = srccam.nearClipPlane;
+                    dstcam.farClipPlane = srccam.farClipPlane;
+                }
+            }
+            else if (src.dataType == EntityType.Light)
+            {
+                var srclt = srcgo.GetComponent<Light>();
+                if (srclt != null)
+                {
+                    var dstlt = Misc.GetOrAddComponent<Light>(dstgo);
+                    dstlt.type = srclt.type;
+                    dstlt.color = srclt.color;
+                    dstlt.intensity = srclt.intensity;
+                    dstlt.range = srclt.range;
+                    dstlt.spotAngle = srclt.spotAngle;
+                }
+            }
+            else if (src.dataType == EntityType.Mesh)
+            {
+                var srcsmr = srcgo.GetComponent<SkinnedMeshRenderer>();
+                if (srcsmr != null)
+                {
+                    // disable GameObject while updating mesh and materials
+                    bool active = dstgo.activeSelf;
+                    dstgo.SetActive(false);
+
+                    var dstpr = dstgo.GetComponent<PointCacheRenderer>();
+                    if (dstpr != null)
+                    {
+                        dstpr.sharedMesh = srcsmr.sharedMesh;
+
+                        var materials = srcsmr.sharedMaterials;
+                        for (int i = 0; i < materials.Length; ++i)
+                            materials[i].enableInstancing = true;
+                        dstpr.sharedMaterials = materials;
+                    }
+                    else
+                    {
+                        var dstsmr = Misc.GetOrAddComponent<SkinnedMeshRenderer>(dstgo);
+                        var mesh = srcsmr.sharedMesh;
+                        dstsmr.sharedMesh = mesh;
+                        dstsmr.sharedMaterials = srcsmr.sharedMaterials;
+                        dstsmr.bones = srcsmr.bones;
+                        dstsmr.rootBone = srcsmr.rootBone;
+                        dstsmr.updateWhenOffscreen = srcsmr.updateWhenOffscreen;
+                        if (mesh != null)
+                        {
+                            int blendShapeCount = mesh.blendShapeCount;
+                            for (int bi = 0; bi < blendShapeCount; ++bi)
+                                dstsmr.SetBlendShapeWeight(bi, srcsmr.GetBlendShapeWeight(bi));
+                        }
+
+                        // handle mesh collider
+                        if (m_updateMeshColliders)
+                        {
+                            var srcmc = srcgo.GetComponent<MeshCollider>();
+                            if (srcmc != null && srcmc.sharedMesh == mesh)
+                            {
+                                var dstmc = Misc.GetOrAddComponent<MeshCollider>(dstgo);
+                                dstmc.enabled = srcmc.enabled;
+                                dstmc.isTrigger = srcmc.isTrigger;
+                                dstmc.sharedMaterial = srcmc.sharedMaterial;
+                                dstmc.sharedMesh = mesh;
+                                dstmc.convex = srcmc.convex;
+                                dstmc.cookingOptions = srcmc.cookingOptions;
+                            }
+                        }
+                    }
+
+                    dstgo.SetActive(active);
+                }
+            }
+            else if (src.dataType == EntityType.Points)
+            {
+                var srcpr = srcgo.GetComponent<PointCacheRenderer>();
+                if (srcpr != null)
+                {
+                    var dstpr = Misc.GetOrAddComponent<PointCacheRenderer>(dstgo);
+                    dstpr.sharedMesh = srcpr.sharedMesh;
+
+                    var materials = srcpr.sharedMaterials;
                     for (int i = 0; i < materials.Length; ++i)
                         materials[i].enableInstancing = true;
                     dstpr.sharedMaterials = materials;
-                }
-                else
-                {
-                    var dstsmr = Misc.GetOrAddComponent<SkinnedMeshRenderer>(dstgo);
-                    var mesh = srcsmr.sharedMesh;
-                    dstsmr.sharedMesh = mesh;
-                    dstsmr.sharedMaterials = srcsmr.sharedMaterials;
-                    dstsmr.bones = srcsmr.bones;
-                    dstsmr.rootBone = srcsmr.rootBone;
-                    dstsmr.updateWhenOffscreen = srcsmr.updateWhenOffscreen;
-                    if (mesh != null)
-                    {
-                        int blendShapeCount = mesh.blendShapeCount;
-                        for (int bi = 0; bi < blendShapeCount; ++bi)
-                            dstsmr.SetBlendShapeWeight(bi, srcsmr.GetBlendShapeWeight(bi));
-                    }
-
-#if UNITY_EDITOR
-                    if (!EditorApplication.isPlaying)
-                    {
-                        dstgo.SetActive(false); // 
-                        dstgo.SetActive(true);  // force recalculate skinned mesh on editor
-                    }
-#endif
                 }
             }
         }
@@ -1822,7 +1946,16 @@ namespace UTJ.MeshSync
                     animPath = animPath.Remove(0, 1);
 
                 // get animation curves
-                data.ExportToClip(clip, root.gameObject, target.gameObject, animPath, m_animtionInterpolation);
+                var ctx = new AnimationImportContext()
+                {
+                    clip = clip,
+                    root = root.gameObject,
+                    target = target.gameObject,
+                    path = animPath,
+                    interpolation = m_animtionInterpolation,
+                    enableVisibility = m_syncVisibility,
+                };
+                data.ExportToClip(ctx);
             }
 
             // smooth rotation curves
@@ -2278,9 +2411,14 @@ namespace UTJ.MeshSync
             }
         }
 
+        [SerializeField] int m_serverPortPrev = ServerSettings.defaultPort;
         void OnValidate()
         {
-            m_requestRestartServer = true;
+            if (m_serverPort != m_serverPortPrev)
+            {
+                m_serverPortPrev = m_serverPort;
+                m_requestRestartServer = true;
+            }
         }
 #endif
 

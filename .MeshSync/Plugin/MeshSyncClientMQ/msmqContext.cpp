@@ -10,13 +10,48 @@ msmqContext::msmqContext(MQBasePlugin *plugin)
 
 msmqContext::~msmqContext()
 {
-    m_send_meshes.wait();
-    m_send_camera.wait();
+    wait();
 }
 
 msmqSettings& msmqContext::getSettings()
 {
     return m_settings;
+}
+
+void msmqLogInfo(const char *message);
+
+void msmqContext::logInfo(const char * format, ...)
+{
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    msmqLogInfo(buf);
+    va_end(args);
+}
+
+bool msmqContext::isServerAvailable()
+{
+    m_send_meshes.client_settings = m_settings.client_settings;
+    return m_send_meshes.isServerAvaileble();
+}
+
+const std::string& msmqContext::getErrorMessage()
+{
+    return m_send_meshes.getErrorMessage();
+}
+
+bool msmqContext::isSending()
+{
+    return m_send_meshes.isSending() || m_send_camera.isSending();
+}
+
+void msmqContext::wait()
+{
+    m_send_meshes.wait();
+    m_send_camera.wait();
 }
 
 void msmqContext::clear()
@@ -32,65 +67,42 @@ void msmqContext::clear()
     m_pending_send_meshes = false;
 }
 
-void msmqContext::flushPendingRequests(MQDocument doc)
+void msmqContext::update(MQDocument doc)
 {
     if (m_pending_send_meshes) {
-        sendMeshes(doc, true);
+        sendMeshes(doc, false);
     }
 }
 
-void msmqContext::sendMeshes(MQDocument doc, bool force)
+bool msmqContext::sendMaterials(MQDocument doc, bool dirty_all)
 {
-    if (!force) {
-        if (!m_settings.auto_sync)
-            return;
+    if (isSending()) {
+        return false;
     }
 
-    if (m_send_meshes.isSending()) {
-        if (force) {
-            m_send_meshes.wait();
-        }
-        else {
-            m_pending_send_meshes = true;
-            return;
-        }
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(dirty_all);
+    exportMaterials(doc);
+
+    kickAsyncSend();
+    return true;
+}
+
+bool msmqContext::sendMeshes(MQDocument doc, bool dirty_all)
+{
+    if (isSending()) {
+        m_pending_send_meshes = true;
+        return false;
     }
     m_pending_send_meshes = false;
 
-    if (force) {
-        m_material_manager.makeDirtyAll();
-        m_entity_manager.makeDirtyAll();
-    }
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_entity_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(false); // false because too heavy
 
+    exportMaterials(doc);
 
-    int num_materials = doc->GetMaterialCount();
     int num_objects = doc->GetObjectCount();
-
-    {
-        // gather material data
-        char buf[1024];
-        m_material_index_to_id.clear();
-        m_material_index_to_id.resize(num_materials, ms::InvalidID);
-
-        for (int mi = 0; mi < num_materials; ++mi) {
-            auto src = doc->GetMaterial(mi);
-            if (!src)
-                continue;
-
-            auto dst = ms::Material::create();
-            dst->id = m_material_index_to_id[mi] = m_material_ids.getID(src);
-            dst->index = mi;
-            dst->name = GetName(src);
-
-            auto& stdmat = ms::AsStandardMaterial(*dst);
-            stdmat.setColor(to_float4(src->GetColor()));
-            if (m_settings.sync_textures) {
-                src->GetTextureName(buf, sizeof(buf));
-                stdmat.setColorMap(exportTexture(buf, ms::TextureType::Default));
-            }
-            m_material_manager.add(dst);
-        }
-    }
 
 #if MQPLUGIN_VERSION >= 0x0470
     // list morph targets
@@ -103,10 +115,9 @@ void msmqContext::sendMeshes(MQDocument doc, bool force)
             auto base_id = base->GetUniqueID();
             morph_manager.GetTargetObjects(base, targets);
             for (auto& target : targets) {
-                MorphRecord rec;
+                auto& rec = m_morph_records[target->GetUniqueID()];
                 rec.base_obj = base;
                 rec.target_obj = target;
-                m_morph_records[target->GetUniqueID()] = rec;
             }
         }
     }
@@ -146,6 +157,7 @@ void msmqContext::sendMeshes(MQDocument doc, bool force)
     }
 
 #if MQPLUGIN_VERSION >= 0x0464
+    // bones
     if (m_settings.sync_bones) {
         // gather bone data
         MQBoneManager bone_manager(m_plugin, doc);
@@ -266,6 +278,7 @@ void msmqContext::sendMeshes(MQDocument doc, bool force)
 #endif
 
 #if MQPLUGIN_VERSION >= 0x0470
+    // morph
     if (m_settings.sync_morphs) {
         // build morph base-target pairs
         for (auto& kvp : m_morph_records) {
@@ -339,31 +352,10 @@ void msmqContext::sendMeshes(MQDocument doc, bool force)
         m_entity_manager.add(rec.dst);
     m_obj_records.clear();
 
-    m_material_ids.eraseStaleRecords();
-    m_material_manager.eraseStaleMaterials();
     m_entity_manager.eraseStaleEntities();
 
-    m_send_meshes.on_prepare = [this]() {
-        auto& t = m_send_meshes;
-        t.client_settings = m_settings.client_settings;
-        t.scene_settings.handedness = ms::Handedness::Right;
-        t.scene_settings.scale_factor = m_settings.scale_factor;
-
-        t.textures = m_texture_manager.getDirtyTextures();
-        t.materials = m_material_manager.getDirtyMaterials();
-        t.transforms = m_entity_manager.getDirtyTransforms();
-        t.geometries = m_entity_manager.getDirtyGeometries();
-
-        t.deleted_materials = m_material_manager.getDeleted();
-        t.deleted_entities = m_entity_manager.getDeleted();
-    };
-    m_send_meshes.on_success = [this]() {
-        m_material_ids.clearDirtyFlags();
-        m_texture_manager.clearDirtyFlags();
-        m_material_manager.clearDirtyFlags();
-        m_entity_manager.clearDirtyFlags();
-    };
-    m_send_meshes.kick();
+    kickAsyncSend();
+    return true;
 }
 
 void msmqContext::buildBonePath(std::string& dst, BoneRecord& bd)
@@ -377,25 +369,18 @@ void msmqContext::buildBonePath(std::string& dst, BoneRecord& bd)
 }
 
 
-void msmqContext::sendCamera(MQDocument doc, bool force)
+bool msmqContext::sendCamera(MQDocument doc, bool dirty_all)
 {
-    if (!force) {
-        if (!m_settings.auto_sync)
-            return;
+    if (isSending()) {
+        return false;
     }
-    if (!m_settings.sync_camera)
-        return;
-
-    // just return if previous request is in progress
-    if (m_send_camera.isSending())
-        return;
 
     // gather camera data
     if (auto scene = doc->GetScene(0)) { // GetScene(0): perspective view
         if (!m_camera) {
             m_camera = ms::Camera::create();
-            m_camera->near_plane *= m_settings.scale_factor;
-            m_camera->far_plane *= m_settings.scale_factor;
+            m_camera->near_plane = 0.0f;
+            m_camera->far_plane = 0.0f;
         }
         auto prev_pos = m_camera->position;
         auto prev_rot = m_camera->rotation;
@@ -404,13 +389,13 @@ void msmqContext::sendCamera(MQDocument doc, bool force)
         m_camera->path = m_settings.host_camera_path;
         extractCameraData(doc, scene, *m_camera);
 
-        if (!force &&
+        if (!dirty_all &&
             m_camera->position == prev_pos &&
             m_camera->rotation == prev_rot &&
             m_camera->fov == prev_fov)
         {
             // no need to send
-            return;
+            return true;
         }
     }
 
@@ -424,6 +409,7 @@ void msmqContext::sendCamera(MQDocument doc, bool force)
         };
     }
     m_send_camera.kick();
+    return true;
 }
 
 
@@ -491,9 +477,68 @@ bool msmqContext::importMeshes(MQDocument doc)
     return true;
 }
 
+void msmqContext::kickAsyncSend()
+{
+
+    m_send_meshes.on_prepare = [this]() {
+        auto& t = m_send_meshes;
+        t.client_settings = m_settings.client_settings;
+        t.scene_settings.handedness = ms::Handedness::Right;
+        t.scene_settings.scale_factor = m_settings.scale_factor;
+
+        t.textures = m_texture_manager.getDirtyTextures();
+        t.materials = m_material_manager.getDirtyMaterials();
+        t.transforms = m_entity_manager.getDirtyTransforms();
+        t.geometries = m_entity_manager.getDirtyGeometries();
+
+        t.deleted_materials = m_material_manager.getDeleted();
+        t.deleted_entities = m_entity_manager.getDeleted();
+    };
+    m_send_meshes.on_success = [this]() {
+        m_material_ids.clearDirtyFlags();
+        m_texture_manager.clearDirtyFlags();
+        m_material_manager.clearDirtyFlags();
+        m_entity_manager.clearDirtyFlags();
+    };
+    m_send_meshes.kick();
+}
+
 int msmqContext::exportTexture(const std::string& path, ms::TextureType type)
 {
     return m_texture_manager.addFile(path, type);
+}
+
+int msmqContext::exportMaterials(MQDocument doc)
+{
+    char buf[1024];
+    int num_materials = doc->GetMaterialCount();
+
+    m_material_index_to_id.clear();
+    m_material_index_to_id.resize(num_materials, ms::InvalidID);
+
+    for (int mi = 0; mi < num_materials; ++mi) {
+        auto src = doc->GetMaterial(mi);
+        if (!src)
+            continue;
+
+        auto dst = ms::Material::create();
+        dst->id = m_material_index_to_id[mi] = m_material_ids.getID(src);
+        dst->index = mi;
+        dst->name = GetName(src);
+
+        auto& stdmat = ms::AsStandardMaterial(*dst);
+        stdmat.setColor(to_float4(src->GetColor()));
+        if (m_settings.sync_textures) {
+            src->GetTextureName(buf, sizeof(buf));
+            stdmat.setColorMap(exportTexture(buf, ms::TextureType::Default));
+        }
+        m_material_manager.add(dst);
+    }
+
+    m_material_ids.eraseStaleRecords();
+    m_material_manager.eraseStaleMaterials();
+
+    return num_materials;
 }
 
 MQObject msmqContext::findMesh(MQDocument doc, const char *name)
@@ -679,9 +724,9 @@ void msmqContext::extractCameraData(MQDocument doc, MQScene scene, ms::Camera& d
 {
     dst.position = to_float3(scene->GetCameraPosition());
     auto eular = ToEular(scene->GetCameraAngle(), true);
-    dst.rotation = rotateZXY(eular);
+    dst.rotation = rotate_zxy(eular);
 
-    dst.fov = scene->GetFOV() * mu::Rad2Deg;
+    dst.fov = scene->GetFOV() * mu::RadToDeg;
 #if MQPLUGIN_VERSION >= 0x450
     dst.near_plane = scene->GetFrontClip();
     dst.far_plane = scene->GetBackClip();

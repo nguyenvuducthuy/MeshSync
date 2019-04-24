@@ -1,47 +1,47 @@
 #include "pch.h"
-#include "msmbDevice.h"
-#include "msmbUtils.h"
+#include "msmobuDevice.h"
+#include "msmobuUtils.h"
 
 
-FBDeviceImplementation(msmbDevice);
-FBRegisterDevice("msmbDevice", msmbDevice, "UnityMeshSync", "UnityMeshSync for MotionBuilder", FB_DEFAULT_SDK_ICON);
+FBDeviceImplementation(msmobuDevice);
+FBRegisterDevice("msmbDevice", msmobuDevice, "UnityMeshSync", "UnityMeshSync for MotionBuilder", FB_DEFAULT_SDK_ICON);
 
-ms::Identifier msmbDevice::NodeRecord::getIdentifier() const
+ms::Identifier msmobuDevice::NodeRecord::getIdentifier() const
 {
     return { path,id };
 }
 
-bool msmbDevice::FBCreate()
+bool msmobuDevice::FBCreate()
 {
-    FBSystem::TheOne().Scene->OnChange.Add(this, (FBCallback)&msmbDevice::onSceneChange);
-    FBSystem::TheOne().OnConnectionDataNotify.Add(this, (FBCallback)&msmbDevice::onDataUpdate);
-    FBEvaluateManager::TheOne().OnRenderingPipelineEvent.Add(this, (FBCallback)&msmbDevice::onRender);
-    FBEvaluateManager::TheOne().OnSynchronizationEvent.Add(this, (FBCallback)&msmbDevice::onSynchronization);
+    FBSystem::TheOne().Scene->OnChange.Add(this, (FBCallback)&msmobuDevice::onSceneChange);
+    FBSystem::TheOne().OnConnectionDataNotify.Add(this, (FBCallback)&msmobuDevice::onDataUpdate);
+    FBEvaluateManager::TheOne().OnRenderingPipelineEvent.Add(this, (FBCallback)&msmobuDevice::onRender);
+    FBEvaluateManager::TheOne().OnSynchronizationEvent.Add(this, (FBCallback)&msmobuDevice::onSynchronization);
     return true;
 }
 
-void msmbDevice::FBDestroy()
+void msmobuDevice::FBDestroy()
 {
-    m_sender.wait();
+    wait();
 
-    FBSystem::TheOne().Scene->OnChange.Remove(this, (FBCallback)&msmbDevice::onSceneChange);
-    FBSystem::TheOne().OnConnectionDataNotify.Remove(this, (FBCallback)&msmbDevice::onDataUpdate);
-    FBEvaluateManager::TheOne().OnRenderingPipelineEvent.Remove(this, (FBCallback)&msmbDevice::onRender);
-    FBEvaluateManager::TheOne().OnSynchronizationEvent.Remove(this, (FBCallback)&msmbDevice::onSynchronization);
+    FBSystem::TheOne().Scene->OnChange.Remove(this, (FBCallback)&msmobuDevice::onSceneChange);
+    FBSystem::TheOne().OnConnectionDataNotify.Remove(this, (FBCallback)&msmobuDevice::onDataUpdate);
+    FBEvaluateManager::TheOne().OnRenderingPipelineEvent.Remove(this, (FBCallback)&msmobuDevice::onRender);
+    FBEvaluateManager::TheOne().OnSynchronizationEvent.Remove(this, (FBCallback)&msmobuDevice::onSynchronization);
 }
 
-bool msmbDevice::DeviceOperation(kDeviceOperations pOperation)
+bool msmobuDevice::DeviceOperation(kDeviceOperations pOperation)
 {
     return false;
 }
 
-void msmbDevice::DeviceTransportNotify(kTransportMode pMode, FBTime pTime, FBTime pSystem)
+void msmobuDevice::DeviceTransportNotify(kTransportMode pMode, FBTime pTime, FBTime pSystem)
 {
-    if (auto_sync)
+    if (m_settings.auto_sync)
         m_data_updated = true;
 }
 
-void msmbDevice::onSceneChange(HIRegister pCaller, HKEventBase pEvent)
+void msmobuDevice::onSceneChange(HIRegister pCaller, HKEventBase pEvent)
 {
     FBEventSceneChange SceneChangeEvent = pEvent;
     FBSceneChangeType type = SceneChangeEvent.Type;
@@ -62,8 +62,7 @@ void msmbDevice::onSceneChange(HIRegister pCaller, HKEventBase pEvent)
     case kFBSceneChangeMergeTransactionEnd:
     case kFBSceneChangeChangeName:
     case kFBSceneChangeChangedName:
-        if (type == kFBSceneChangeLoadEnd ||
-            type == kFBSceneChangeAddChild)
+        if (type == kFBSceneChangeLoadEnd || type == kFBSceneChangeAddChild)
             m_dirty_meshes = m_dirty_textures = true;
         m_data_updated = true;
         break;
@@ -73,44 +72,91 @@ void msmbDevice::onSceneChange(HIRegister pCaller, HKEventBase pEvent)
     }
 }
 
-void msmbDevice::onDataUpdate(HIRegister pCaller, HKEventBase pEvent)
+void msmobuDevice::onDataUpdate(HIRegister pCaller, HKEventBase pEvent)
 {
     m_data_updated = true;
-    if (bake_deformars)
+    if (m_settings.bake_deformars)
         m_dirty_meshes = true;
 }
 
-void msmbDevice::onRender(HIRegister pCaller, HKEventBase pEvent)
+void msmobuDevice::onRender(HIRegister pCaller, HKEventBase pEvent)
 {
-    // note: mocap devices seem doesn't trigger scene change events.
+    // note: mocap devices seem don't trigger scene change events.
     //       so, always set m_pending true on render when auto sync is enabled.
     //       obviously this wastes CPU time, but I couldn't find a better way... (issue #47)
-    if (auto_sync /*&& m_data_updated*/)
+    if (m_settings.auto_sync /*&& m_data_updated*/) {
         m_pending = true;
+        if (m_settings.bake_deformars)
+            m_dirty_meshes = true;
+    }
 }
 
-void msmbDevice::onSynchronization(HIRegister pCaller, HKEventBase pEvent)
+void msmobuDevice::onSynchronization(HIRegister pCaller, HKEventBase pEvent)
 {
     FBEventEvalGlobalCallback lFBEvent(pEvent);
     FBGlobalEvalCallbackTiming timing = lFBEvent.GetTiming();
     if (timing == kFBGlobalEvalCallbackSyn) {
-        if (auto_sync)
+        if (m_settings.auto_sync)
             update();
     }
 }
 
-void msmbDevice::update()
+msmobuSettings& msmobuDevice::getSettings()
+{
+    return m_settings;
+}
+
+void msmobuDevice::logInfo(const char *format, ...)
+{
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    FBTraceWithLevel(kFBNORMAL_TRACE, buf);
+    va_end(args);
+}
+void msmobuDevice::logError(const char *format, ...)
+{
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    FBTraceWithLevel(kFBCRITICAL_TRACE, buf);
+    va_end(args);
+}
+
+bool msmobuDevice::isServerAvailable()
+{
+    m_sender.client_settings = m_settings.client_settings;
+    return m_sender.isServerAvaileble();
+}
+const std::string& msmobuDevice::getErrorMessage()
+{
+    return m_sender.getErrorMessage();
+}
+
+
+void msmobuDevice::wait()
+{
+    m_sender.wait();
+}
+
+void msmobuDevice::update()
 {
     if (!m_pending)
         return;
-    sendScene(false);
+    sendObjects(false);
 }
 
-void msmbDevice::kickAsyncSend()
+void msmobuDevice::kickAsyncSend()
 {
     // process extract tasks
     if (!m_extract_tasks.empty()) {
-        if (parallel_extraction) {
+        if (m_settings.parallel_extraction) {
             mu::parallel_for_each(m_extract_tasks.begin(), m_extract_tasks.end(), [](ExtractTasks::value_type& task) {
                 task();
             });
@@ -126,9 +172,9 @@ void msmbDevice::kickAsyncSend()
 
     m_sender.on_prepare = [this]() {
         auto& t = m_sender;
-        t.client_settings = client_settings;
+        t.client_settings = m_settings.client_settings;
         t.scene_settings.handedness = ms::Handedness::Right;
-        t.scene_settings.scale_factor = scale_factor;
+        t.scene_settings.scale_factor = m_settings.scale_factor;
 
         t.textures = m_texture_manager.getDirtyTextures();
         t.materials = m_material_manager.getDirtyMaterials();
@@ -150,27 +196,44 @@ void msmbDevice::kickAsyncSend()
 }
 
 
-bool msmbDevice::sendScene(bool force_all)
+bool msmobuDevice::sendMaterials(bool dirty_all)
 {
-    if (force_all) {
-        m_dirty_meshes = m_dirty_textures = true;
-        m_material_manager.makeDirtyAll();
-        m_entity_manager.makeDirtyAll();
+    if (m_sender.isSending()) {
+        return false;
     }
 
-    m_data_updated = m_pending = false;
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(dirty_all);
+    exportMaterials();
+
+    // send
+    kickAsyncSend();
+    return true;
+}
+
+bool msmobuDevice::sendObjects(bool dirty_all)
+{
     if (m_sender.isSending()) {
         m_pending = true;
         return false;
     }
+    m_data_updated = m_pending = false;
 
-    if (sync_meshes)
+    if (dirty_all) {
+        m_dirty_meshes = true;
+        m_dirty_textures = true;
+    }
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_entity_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(false); // false because too heavy
+
+    if (m_settings.sync_meshes)
         exportMaterials();
 
     // export nodes
     int num_exported = 0;
     EnumerateAllNodes([this, &num_exported](FBModel* node) {
-        if (exportObject(node, false))
+        if (exportObject(node, true))
             ++num_exported;
     });
 
@@ -202,7 +265,7 @@ bool msmbDevice::sendScene(bool force_all)
     }
 }
 
-ms::TransformPtr msmbDevice::exportObject(FBModel* src, bool force)
+ms::TransformPtr msmobuDevice::exportObject(FBModel* src, bool parent, bool tip)
 {
     if (!src)
         return nullptr;
@@ -211,57 +274,74 @@ ms::TransformPtr msmbDevice::exportObject(FBModel* src, bool force)
     if (rec.dst)
         return rec.dst;
 
-    if (rec.name.empty()) {
-        rec.src = src;
-        rec.name = GetName(src);
-        rec.path = GetPath(src);
-        rec.index = ++m_node_index_seed;
+    {
+        // check rename
+        if (rec.name.empty()) {
+            rec.src = src;
+            rec.name = GetName(src);
+            rec.path = GetPath(src);
+            rec.index = ++m_node_index_seed;
+        }
+        else if (rec.name != GetName(src)) {
+            // renamed
+            m_entity_manager.erase(rec.getIdentifier());
+            rec.name = GetName(src);
+            rec.path = GetPath(src);
+        }
+        rec.exist = true;
     }
-    else if (rec.name != GetName(src)) {
-        // renamed
-        m_entity_manager.erase(rec.getIdentifier());
-        rec.name = GetName(src);
-        rec.path = GetPath(src);
-    }
-    rec.exist = true;
 
     ms::TransformPtr ret;
+    auto handle_parent = [&]() {
+        if (parent)
+            exportObject(src->Parent, parent, false);
+    };
+    auto handle_transform = [&]() {
+        handle_parent();
+        ret = exportTransform(rec);
+    };
+
     if (IsCamera(src)) { // camera
-        if (sync_cameras) {
-            exportObject(src->Parent, true);
+        if (m_settings.sync_cameras) {
+            handle_parent();
             ret = exportCamera(rec);
         }
+        else if (!tip && parent)
+            handle_transform();
     }
     else if (IsLight(src)) { // light
-        if (sync_lights) {
-            exportObject(src->Parent, true);
+        if (m_settings.sync_lights) {
+            handle_parent();
             ret = exportLight(rec);
         }
+        else if (!tip && parent)
+            handle_transform();
     }
     else if (IsMesh(src)) { // mesh
-        if (sync_bones && !bake_deformars) {
+        if (m_settings.sync_bones && !m_settings.bake_deformars) {
             EachBones(src, [this](FBModel *bone) {
                 exportObject(bone, true);
             });
         }
-        if (sync_meshes) {
-            exportObject(src->Parent, true);
-            if (m_dirty_meshes)
+        if (m_settings.sync_meshes || m_settings.sync_blendshapes) {
+            handle_parent();
+            if (m_settings.sync_meshes && m_dirty_meshes)
                 ret = exportMesh(rec);
             else
-                ret = exportMeshSimple(rec);
+                ret = exportBlendshapeWeights(rec);
         }
+        else if (!tip && parent)
+            handle_transform();
     }
-    else if (force) {
-        exportObject(src->Parent, true);
-        ret = exporttTransform(rec);
+    else {
+        handle_transform();
     }
 
     return ret;
 }
 
 
-static void ExtractTransformData(FBModel* src, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis)
+static void ExtractTransformData(FBModel *src, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis)
 {
     FBMatrix tmp;
     src->GetMatrix(tmp, kModelTransformation, true, nullptr);
@@ -275,16 +355,27 @@ static void ExtractTransformData(FBModel* src, mu::float3& pos, mu::quatf& rot, 
     pos = extract_position(trs);
     rot = extract_rotation(trs);
     scale = extract_scale(trs);
-    vis = src->Visibility;
+    vis = IsVisibleInHierarchy(src);
+
+    if (IsCamera(src))
+        rot *= mu::rotate_y(90.0f * mu::DegToRad);
+    else if (IsLight(src))
+        rot *= mu::rotate_x(90.0f * mu::DegToRad);
 }
 
 static void ExtractCameraData(FBCamera* src, bool& ortho, float& near_plane, float& far_plane, float& fov,
-    float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance)
+    float& focal_length, mu::float2& sensor_size, mu::float2& lens_shift)
 {
     ortho = src->Type == kFBCameraTypeOrthogonal;
     near_plane = (float)src->NearPlaneDistance;
     far_plane = (float)src->FarPlaneDistance;
     fov = (float)src->FieldOfViewY;
+
+    focal_length = (float)src->FocalLength;
+    sensor_size.x = (float)(src->FilmSizeWidth * mu::InchToMillimeter_d);
+    sensor_size.y = (float)(src->FilmSizeHeight * mu::InchToMillimeter_d);
+    lens_shift.x = (float)src->OpticalCenterX;
+    lens_shift.y = (float)src->OpticalCenterY;
 }
 
 static void ExtractLightData(FBLight* src, ms::Light::LightType& type, mu::float4& color, float& intensity, float& spot_angle)
@@ -308,15 +399,18 @@ static void ExtractLightData(FBLight* src, ms::Light::LightType& type, mu::float
     intensity = (float)src->Intensity * 0.01f;
 }
 
-// Body: [](const char *name, double value)->void
+// Body: [](const char *name, double value) -> void
 template<class Body>
-static inline void EnumerateAnimationNVP(FBModel *src, const Body& body)
+static inline void EachAnimationNVP(FBModel *src, const Body& body)
 {
     FBAnimationNode *anode = src->AnimationNode;
     if (anode) {
         Each(anode->Nodes, [&body](FBAnimationNode *n) {
+            // FBAnimationNode may have array of double data. (translation: 3 elements, blendshape weight: 1 element, etc)
+            // and ReadData() assume dst has enough space. so we must be extremely careful!
             const char *name = n->Name;
-            if (name) {
+            int c = n->GetDataDoubleArrayCount();
+            if (c == 1) {
                 double value;
                 n->ReadData(&value);
                 body(name, value);
@@ -327,7 +421,7 @@ static inline void EnumerateAnimationNVP(FBModel *src, const Body& body)
 
 
 template<class T>
-inline std::shared_ptr<T> msmbDevice::createEntity(NodeRecord& n)
+inline std::shared_ptr<T> msmobuDevice::createEntity(NodeRecord& n)
 {
     auto ret = T::create();
     auto& dst = *ret;
@@ -337,7 +431,7 @@ inline std::shared_ptr<T> msmbDevice::createEntity(NodeRecord& n)
     return ret;
 }
 
-ms::TransformPtr msmbDevice::exporttTransform(NodeRecord& n)
+ms::TransformPtr msmobuDevice::exportTransform(NodeRecord& n)
 {
     auto ret = createEntity<ms::Transform>(n);
     auto& dst = *ret;
@@ -349,38 +443,34 @@ ms::TransformPtr msmbDevice::exporttTransform(NodeRecord& n)
     return ret;
 }
 
-ms::CameraPtr msmbDevice::exportCamera(NodeRecord& n)
+ms::CameraPtr msmobuDevice::exportCamera(NodeRecord& n)
 {
     auto ret = createEntity<ms::Camera>(n);
     auto& dst = *ret;
     auto src = static_cast<FBCamera*>(n.src);
 
     ExtractTransformData(src, dst.position, dst.rotation, dst.scale, dst.visible);
-    dst.rotation *= mu::rotateY(90.0f * mu::Deg2Rad);
-
     ExtractCameraData(src, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov,
-        dst.horizontal_aperture, dst.vertical_aperture, dst.focal_length, dst.focus_distance);
+        dst.focal_length, dst.sensor_size, dst.lens_shift);
 
     m_entity_manager.add(ret);
     return ret;
 }
 
-ms::LightPtr msmbDevice::exportLight(NodeRecord& n)
+ms::LightPtr msmobuDevice::exportLight(NodeRecord& n)
 {
     auto ret = createEntity<ms::Light>(n);
     auto& dst = *ret;
     auto src = static_cast<FBLight*>(n.src);
 
     ExtractTransformData(src, dst.position, dst.rotation, dst.scale, dst.visible);
-    dst.rotation *= mu::rotateX(90.0f * mu::Deg2Rad);
-
     ExtractLightData(src, dst.light_type, dst.color, dst.intensity, dst.spot_angle);
 
     m_entity_manager.add(ret);
     return ret;
 }
 
-ms::MeshPtr msmbDevice::exportMeshSimple(NodeRecord& n)
+ms::MeshPtr msmobuDevice::exportBlendshapeWeights(NodeRecord& n)
 {
     auto ret = createEntity<ms::Mesh>(n);
     auto& dst = *ret;
@@ -393,7 +483,7 @@ ms::MeshPtr msmbDevice::exportMeshSimple(NodeRecord& n)
         int num_shapes = geom->ShapeGetCount();
         if (num_shapes) {
             std::map<std::string, float> weight_table;
-            EnumerateAnimationNVP(src, [&weight_table](const char *name, double value) {
+            EachAnimationNVP(src, [&weight_table](const char *name, double value) {
                 weight_table[name] = (float)value;
             });
 
@@ -415,7 +505,7 @@ ms::MeshPtr msmbDevice::exportMeshSimple(NodeRecord& n)
     return ret;
 }
 
-ms::MeshPtr msmbDevice::exportMesh(NodeRecord& n)
+ms::MeshPtr msmobuDevice::exportMesh(NodeRecord& n)
 {
     auto ret = createEntity<ms::Mesh>(n);
     auto& dst = *ret;
@@ -430,14 +520,14 @@ ms::MeshPtr msmbDevice::exportMesh(NodeRecord& n)
     return ret;
 }
 
-void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
+void msmobuDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
 {
     FBModelVertexData *vd = src->ModelVertexData;
     int num_vertices = vd->GetVertexCount();
 
     // points
     {
-        auto points = (const FBVertex*)vd->GetVertexArray(kFBGeometryArrayID_Point, bake_deformars);
+        auto points = (const FBVertex*)vd->GetVertexArray(kFBGeometryArrayID_Point, m_settings.bake_deformars);
         if (!points)
             return;
 
@@ -448,7 +538,7 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
 
     // normals
     {
-        auto normals = (const FBNormal*)vd->GetVertexArray(kFBGeometryArrayID_Normal, bake_deformars);
+        auto normals = (const FBNormal*)vd->GetVertexArray(kFBGeometryArrayID_Normal, m_settings.bake_deformars);
         if (normals) {
             dst.normals.resize_discard(num_vertices);
             for (int vi = 0; vi < num_vertices; ++vi)
@@ -487,7 +577,7 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
     }
 
     // colors
-    if (auto colors_ = vd->GetVertexArray(kFBGeometryArrayID_Color, bake_deformars)) {
+    if (auto colors_ = vd->GetVertexArray(kFBGeometryArrayID_Color, m_settings.bake_deformars)) {
         auto type = vd->GetVertexArrayType(kFBGeometryArrayID_Color);
         if (type == kFBGeometryArrayElementType_Float4) {
             auto colors = (const mu::float4*)colors_;
@@ -503,9 +593,26 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
         }
     }
 
-    if (!bake_deformars) {
+    if (!m_settings.bake_deformars && m_settings.sync_bones) {
         // skin cluster
         if (FBCluster *cluster = src->Cluster) {
+
+            // MotionBuilder omits weight data if there are vertices with identical position.
+            // so generate vertex reference map.
+            struct Ref { int vi, ri; };
+            RawVector<Ref> brefmap;
+            brefmap.reserve(num_vertices / 4);
+            for (int vi = num_vertices - 1; vi >= 0; --vi) {
+                auto beg = dst.points.begin();
+                auto end = beg + vi;
+                auto it = std::find(beg, end, dst.points[vi]);
+                if (it != end)
+                    brefmap.push_back({ vi, (int)std::distance(beg, it) });
+                else
+                    break;
+            }
+
+
             int num_links = cluster->LinkGetCount();
             for (int li = 0; li < num_links; ++li) {
                 ClusterScope scope(cluster, li);
@@ -535,29 +642,32 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
 
                     FBVector3d t, r, s;
                     cluster->VertexGetTransform(t, r, s);
-                    mu::quatf q = mu::invert(mu::rotateXYZ(to_float3(r) * mu::Deg2Rad));
+                    mu::quatf q = mu::invert(mu::rotate_xyz(to_float3(r) * mu::DegToRad));
                     bd->bindpose = mu::transform(to_float3(t), q, to_float3(s));
                 }
 
                 // weights
                 bd->weights.resize_zeroclear(num_vertices);
-                for (int vi = 0; vi < n; ++vi) {
-                    int i = cluster->VertexGetNumber(vi);
-                    float w = (float)cluster->VertexGetWeight(vi);
-                    bd->weights[i] = w;
+                for (int i = 0; i < n; ++i) {
+                    int vi = cluster->VertexGetNumber(i);
+                    float w = (float)cluster->VertexGetWeight(i);
+                    bd->weights[vi] = w;
                 }
+                for (auto& rel : brefmap)
+                    bd->weights[rel.vi] = bd->weights[rel.ri];
             }
         }
+    }
 
+    if (!m_settings.bake_deformars && m_settings.sync_blendshapes) {
         // blendshapes
         if (FBGeometry *geom = src->Geometry) {
             int num_shapes = geom->ShapeGetCount();
             if (num_shapes) {
                 std::map<std::string, float> weight_table;
-                EnumerateAnimationNVP(src, [&weight_table](const char *name, double value) {
+                EachAnimationNVP(src, [&weight_table](const char *name, double value) {
                     weight_table[name] = (float)value;
                 });
-
 
                 RawVector<mu::float3> tmp_points, tmp_normals;
                 for (int si = 0; si < num_shapes; ++si) {
@@ -609,21 +719,20 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
     int num_subpatches = vd->GetSubPatchCount();
     auto indices = (const int*)vd->GetIndexArray();
     for (int spi = 0; spi < num_subpatches; ++spi) {
+        // note: quad subpatches should be ignored.
+        // FBModelVertexData contains both triangulated subpatches and original quad ones.
+        // so if import both, excessive unnecessary triangles will be generated.
+        // (possibly we should handle kFBGeometry_POINTS and kFBGeometry_LINES. but leave it on at this point)
+        if (vd->GetSubPatchPrimitiveType(spi) != kFBGeometry_TRIANGLES)
+            continue;
+
         int offset = vd->GetSubPatchIndexOffset(spi);
         int count = vd->GetSubPatchIndexSize(spi);
         int mid = m_material_records[vd->GetSubPatchMaterial(spi)].id;
         auto idx_begin = indices + offset;
         auto idx_end = idx_begin + count;
 
-        int ngon = 1;
-        switch (vd->GetSubPatchPrimitiveType(spi)) {
-        case kFBGeometry_POINTS:    ngon = 1; break;
-        case kFBGeometry_LINES:     ngon = 2; break;
-        case kFBGeometry_TRIANGLES: ngon = 3; break;
-        case kFBGeometry_QUADS:     ngon = 4; break;
-        // todo: support other topologies (triangle strip, etc)
-        default: continue;
-        }
+        int ngon = 3;
         int prim_count = count / ngon;
 
         dst.indices.insert(dst.indices.end(), idx_begin, idx_end);
@@ -631,13 +740,13 @@ void msmbDevice::doExtractMesh(ms::Mesh& dst, FBModel * src)
         dst.material_ids.resize(dst.material_ids.size() + prim_count, mid);
     }
 
-    dst.refine_settings.flags.swap_faces = 1;
-    dst.refine_settings.flags.make_double_sided = make_double_sided;
+    dst.refine_settings.flags.flip_faces = 1;
+    dst.refine_settings.flags.make_double_sided = m_settings.make_double_sided;
     dst.setupFlags();
 }
 
 
-int msmbDevice::exportTexture(FBTexture* src, FBMaterialTextureType type)
+int msmobuDevice::exportTexture(FBTexture* src, FBMaterialTextureType type)
 {
     if (!src)
         return -1;
@@ -656,7 +765,7 @@ int msmbDevice::exportTexture(FBTexture* src, FBMaterialTextureType type)
     return -1;
 }
 
-bool msmbDevice::exportMaterial(FBMaterial* src, int index)
+bool msmobuDevice::exportMaterial(FBMaterial* src, int index)
 {
     if (!src)
         return false;
@@ -681,7 +790,7 @@ bool msmbDevice::exportMaterial(FBMaterial* src, int index)
     if ((mu::float3&)emissive != mu::float3::zero())
         stdmat.setEmissionColor(emissive);
 
-    if (sync_textures && m_dirty_textures) {
+    if (m_settings.sync_textures && m_dirty_textures) {
         stdmat.setColorMap(exportTexture(src->GetTexture(kFBMaterialTextureDiffuse), kFBMaterialTextureDiffuse));
         stdmat.setEmissionMap(exportTexture(src->GetTexture(kFBMaterialTextureEmissive), kFBMaterialTextureEmissive));
         stdmat.setBumpMap(exportTexture(src->GetTexture(kFBMaterialTextureNormalMap), kFBMaterialTextureNormalMap));
@@ -690,7 +799,7 @@ bool msmbDevice::exportMaterial(FBMaterial* src, int index)
     return true;
 }
 
-bool msmbDevice::exportMaterials()
+bool msmobuDevice::exportMaterials()
 {
     int num_exported = 0;
     auto& materials = FBSystem::TheOne().Scene->Materials;
@@ -711,21 +820,17 @@ bool msmbDevice::exportMaterials()
 }
 
 
-bool msmbDevice::sendAnimations()
+bool msmobuDevice::sendAnimations()
 {
-    // wait for previous request to complete
-    m_sender.wait();
-
-    if (exportAnimations()) {
-        kickAsyncSend();
-        return true;
-    }
-    else {
+    if (m_sender.isSending())
         return false;
-    }
+
+    if (exportAnimations())
+        kickAsyncSend();
+    return true;
 }
 
-bool msmbDevice::exportAnimations()
+bool msmobuDevice::exportAnimations()
 {
     auto& system = FBSystem::TheOne();
     FBPlayerControl control;
@@ -747,7 +852,7 @@ bool msmbDevice::exportAnimations()
     FBTime time_current = system.LocalTime;
     double time_begin, time_end;
     std::tie(time_begin, time_end) = GetTimeRange(system.CurrentTake);
-    double interval = 1.0 / std::max(animation_sps, 0.01f);
+    double interval = 1.0 / std::max(m_settings.animation_sps, 0.01f);
 
     int reserve_size = int((time_end - time_begin) / interval) + 1;
     for (auto& kvp : m_anim_records) {
@@ -759,7 +864,7 @@ bool msmbDevice::exportAnimations()
         FBTime fbt;
         fbt.SetSecondDouble(t);
         control.Goto(fbt);
-        m_anim_time = (float)(t - time_begin) * animation_time_scale;
+        m_anim_time = (float)(t - time_begin) * m_settings.animation_time_scale;
         for (auto& kvp : m_anim_records)
             kvp.second(this);
 
@@ -773,10 +878,10 @@ bool msmbDevice::exportAnimations()
     m_anim_records.clear();
     control.Goto(time_current);
 
-    if (keyframe_reduction) {
+    if (m_settings.keyframe_reduction) {
         // keyframe reduction
         for (auto& clip : m_animations)
-            clip->reduction(keep_flat_curves);
+            clip->reduction(m_settings.keep_flat_curves);
 
         // erase empty clip
         m_animations.erase(
@@ -787,23 +892,23 @@ bool msmbDevice::exportAnimations()
     return !m_animations.empty();
 }
 
-bool msmbDevice::exportAnimation(FBModel *src, bool force)
+bool msmobuDevice::exportAnimation(FBModel *src, bool force)
 {
     if (!src || m_anim_records.find(src) != m_anim_records.end())
         return 0;
 
-    ms::AnimationPtr dst;
+    ms::TransformAnimationPtr dst;
     AnimationRecord::extractor_t extractor = nullptr;
 
     if (IsCamera(src)) { // camera
         exportAnimation(src->Parent, true);
         dst = ms::CameraAnimation::create();
-        extractor = &msmbDevice::extractCameraAnimation;
+        extractor = &msmobuDevice::extractCameraAnimation;
     }
     else if (IsLight(src)) { // light
         exportAnimation(src->Parent, true);
         dst = ms::LightAnimation::create();
-        extractor = &msmbDevice::extractLightAnimation;
+        extractor = &msmobuDevice::extractLightAnimation;
     }
     else if (IsMesh(src)) { // mesh
         EachBones(src, [this](FBModel *bone) {
@@ -811,20 +916,20 @@ bool msmbDevice::exportAnimation(FBModel *src, bool force)
         });
         exportAnimation(src->Parent, true);
         dst = ms::MeshAnimation::create();
-        extractor = &msmbDevice::extractMeshAnimation;
+        extractor = &msmobuDevice::extractMeshAnimation;
     }
     else if (force) { // other
         exportAnimation(src->Parent, true);
         dst = ms::TransformAnimation::create();
-        extractor = &msmbDevice::extractTransformAnimation;
+        extractor = &msmobuDevice::extractTransformAnimation;
     }
 
     if (dst) {
         auto& rec = m_anim_records[src];
         rec.src = src;
-        rec.dst = dst.get();
+        rec.dst = dst;
         rec.extractor = extractor;
-        m_animations.front()->animations.push_back(dst);
+        m_animations.front()->addAnimation(dst);
         return true;
     }
     else {
@@ -832,7 +937,7 @@ bool msmbDevice::exportAnimation(FBModel *src, bool force)
     }
 }
 
-void msmbDevice::extractTransformAnimation(ms::Animation& dst_, FBModel* src)
+void msmobuDevice::extractTransformAnimation(ms::TransformAnimation& dst_, FBModel* src)
 {
     auto pos = mu::float3::zero();
     auto rot = mu::quatf::identity();
@@ -845,40 +950,37 @@ void msmbDevice::extractTransformAnimation(ms::Animation& dst_, FBModel* src)
     dst.translation.push_back({ t, pos });
     dst.rotation.push_back({ t, rot });
     dst.scale.push_back({ t, scale });
-    //dst.visible.push_back({ t, vis });
+    dst.visible.push_back({ t, vis });
 
     dst.path = GetPath(src);
 }
 
-void msmbDevice::extractCameraAnimation(ms::Animation& dst_, FBModel* src)
+void msmobuDevice::extractCameraAnimation(ms::TransformAnimation& dst_, FBModel* src)
 {
     extractTransformAnimation(dst_, src);
 
     auto& dst = static_cast<ms::CameraAnimation&>(dst_);
-    {
-        auto& last = dst.rotation.back();
-        last.value *= mu::rotateY(90.0f * mu::Deg2Rad);
-    }
 
     bool ortho;
-    float near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance;
-    ExtractCameraData(static_cast<FBCamera*>(src), ortho, near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance);
+    float near_plane, far_plane, fov, focal_length;
+    mu::float2 sensor_size, lens_shift;
+    ExtractCameraData(static_cast<FBCamera*>(src), ortho, near_plane, far_plane, fov, focal_length, sensor_size, lens_shift);
 
     float t = m_anim_time;
     dst.near_plane.push_back({ t , near_plane });
     dst.far_plane.push_back({ t , far_plane });
     dst.fov.push_back({ t , fov });
+
+    dst.focal_length.push_back({ t, focal_length });
+    dst.sensor_size.push_back({ t, sensor_size });
+    dst.lens_shift.push_back({ t, lens_shift });
 }
 
-void msmbDevice::extractLightAnimation(ms::Animation& dst_, FBModel* src)
+void msmobuDevice::extractLightAnimation(ms::TransformAnimation& dst_, FBModel* src)
 {
     extractTransformAnimation(dst_, src);
 
     auto& dst = static_cast<ms::LightAnimation&>(dst_);
-    {
-        auto& last = dst.rotation.back();
-        last.value *= mu::rotateX(90.0f * mu::Deg2Rad);
-    }
 
     ms::Light::LightType type;
     mu::float4 color;
@@ -893,7 +995,7 @@ void msmbDevice::extractLightAnimation(ms::Animation& dst_, FBModel* src)
         dst.spot_angle.push_back({ t, spot_angle });
 }
 
-void msmbDevice::extractMeshAnimation(ms::Animation & dst_, FBModel * src)
+void msmobuDevice::extractMeshAnimation(ms::TransformAnimation & dst_, FBModel * src)
 {
     extractTransformAnimation(dst_, src);
 
@@ -903,24 +1005,15 @@ void msmbDevice::extractMeshAnimation(ms::Animation & dst_, FBModel * src)
     if (FBGeometry *geom = src->Geometry) {
         int num_shapes = geom->ShapeGetCount();
         if (num_shapes) {
-            if (dst.blendshapes.empty()) {
-                EnumerateAnimationNVP(src, [&dst](const char *name, double value) {
-                    auto bsa = ms::BlendshapeAnimation::create();
-                    bsa->name = name;
-                    dst.blendshapes.push_back(bsa);
-                });
-            }
-
             float t = m_anim_time;
-            int idx = 0;
-            EnumerateAnimationNVP(src, [&dst, &idx, t](const char *name, double value) {
-                dst.blendshapes[idx++]->weight.push_back({ t, (float)value });
+            EachAnimationNVP(src, [&dst, t](const char *name, double value) {
+                dst.getBlendshapeCurve(name).push_back({ t, (float)value });
             });
         }
     }
 }
 
-void msmbDevice::AnimationRecord::operator()(msmbDevice *_this)
+void msmobuDevice::AnimationRecord::operator()(msmobuDevice *_this)
 {
     (_this->*extractor)(*dst, src);
 }

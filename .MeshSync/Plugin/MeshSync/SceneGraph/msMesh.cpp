@@ -57,17 +57,12 @@ void BlendShapeFrameData::clear()
 
 #undef EachMember
 
-void BlendShapeFrameData::convertHandedness(bool x, bool yz)
+void BlendShapeFrameData::convertHandedness(bool x, bool /*yz*/)
 {
     if (x) {
         for (auto& v : points) { v = flip_x(v); }
         for (auto& v : normals) { v = flip_x(v); }
         for (auto& v : tangents) { v = flip_x(v); }
-    }
-    if (yz) {
-        for (auto& v : points) { v = swap_yz(v); }
-        for (auto& v : normals) { v = swap_yz(v); }
-        for (auto& v : tangents) { v = swap_yz(v); }
     }
 }
 
@@ -157,14 +152,10 @@ void BoneData::clear()
     weights.clear();
 }
 
-void BoneData::convertHandedness(bool x, bool yz)
+void BoneData::convertHandedness(bool x, bool /*yz*/)
 {
-    if (x) {
+    if (x)
         bindpose = flip_x(bindpose);
-    }
-    if (yz) {
-        bindpose = swap_yz(bindpose);
-    }
 }
 
 void BoneData::applyScaleFactor(float scale)
@@ -232,12 +223,15 @@ void Mesh::clear()
 #define Body(A) vclear(A);
     EachVertexProperty(Body);
 #undef Body
-    vclear(weights4);
 
     root_bone.clear();
     bones.clear();
     blendshapes.clear();
 
+    vclear(weights4);
+    vclear(bone_counts);
+    vclear(bone_offsets);
+    vclear(weights1);
     submeshes.clear();
     splits.clear();
 }
@@ -347,19 +341,14 @@ void Mesh::convertHandedness(bool x, bool yz)
     convertHandedness_BlendShapes(x, yz);
     convertHandedness_Bones(x, yz);
 }
-void Mesh::convertHandedness_Mesh(bool x, bool yz)
+
+void Mesh::convertHandedness_Mesh(bool x, bool /*yz*/)
 {
     if (x) {
         mu::InvertX(points.data(), points.size());
         mu::InvertX(normals.data(), normals.size());
         mu::InvertX(tangents.data(), tangents.size());
         mu::InvertX(velocities.data(), velocities.size());
-    }
-    if (yz) {
-        for (auto& v : points) v = swap_yz(v);
-        for (auto& v : normals) v = swap_yz(v);
-        for (auto& v : tangents) v = swap_yz(v);
-        for (auto& v : velocities) v = swap_yz(v);
     }
 }
 void Mesh::convertHandedness_BlendShapes(bool x, bool yz)
@@ -399,41 +388,28 @@ static inline void Remap(RawVector<T>& dst, const RawVector<T>& src, const RawVe
 
 void Mesh::refine(const MeshRefineSettings& mrs)
 {
-    if (mrs.flags.flip_u) {
+    if (mrs.flags.flip_u)
         mu::InvertU(uv0.data(), uv0.size());
-    }
-    if (mrs.flags.flip_v) {
+    if (mrs.flags.flip_v)
         mu::InvertV(uv0.data(), uv0.size());
-    }
 
-    if (mrs.flags.apply_local2world) {
+    if (mrs.flags.apply_local2world)
         applyTransform(mrs.local2world);
-    }
-    if (mrs.flags.apply_world2local) {
+    if (mrs.flags.apply_world2local)
         applyTransform(mrs.world2local);
-    }
 
-    if (mrs.flags.mirror_x) {
-        float3 plane_n = { 1.0f, 0.0f, 0.0f };
-        float plane_d = 0.0f;
-        applyMirror(plane_n, plane_d, true);
-    }
-    if (mrs.flags.mirror_y) {
-        float3 plane_n = { 0.0f, 1.0f, 0.0f };
-        float plane_d = 0.0f;
-        applyMirror(plane_n, plane_d, true);
-    }
-    if (mrs.flags.mirror_z) {
-        float3 plane_n = { 0.0f, 0.0f, 1.0f };
-        float plane_d = 0.0f;
-        applyMirror(plane_n, plane_d, true);
-    }
-    if (mrs.scale_factor != 1.0f) {
+    if (mrs.flags.mirror_x)
+        applyMirror({ 1.0f, 0.0f, 0.0f }, 0.0f, true);
+    if (mrs.flags.mirror_y)
+        applyMirror({ 0.0f, 1.0f, 0.0f }, 0.0f, true);
+    if (mrs.flags.mirror_z)
+        applyMirror({ 0.0f, 0.0f, 1.0f }, 0.0f, true);
+
+    if (mrs.scale_factor != 1.0f)
         applyScaleFactor(mrs.scale_factor);
-    }
-    if (mrs.flags.swap_handedness || mrs.flags.swap_yz) {
-        convertHandedness(mrs.flags.swap_handedness, mrs.flags.swap_yz);
-    }
+    if (mrs.flags.flip_x || mrs.flags.flip_yz)
+        convertHandedness(mrs.flags.flip_x, mrs.flags.flip_yz);
+
     if (!bones.empty()) {
         if (mrs.max_bone_influence == 4)
             setupBoneWeights4();
@@ -442,7 +418,7 @@ void Mesh::refine(const MeshRefineSettings& mrs)
     }
 
     // normals
-    bool flip_normals = mrs.flags.flip_normals ^ mrs.flags.swap_faces;
+    bool flip_normals = mrs.flags.flip_normals ^ mrs.flags.flip_faces;
     if (mrs.flags.gen_normals || (mrs.flags.gen_normals_with_smooth_angle && mrs.smooth_angle >= 180.0f)) {
         GenerateNormalsPoly(normals, points, counts, indices, flip_normals);
     }
@@ -452,9 +428,8 @@ void Mesh::refine(const MeshRefineSettings& mrs)
 
     // generate back faces
     // this must be after generating normals.
-    if (mrs.flags.make_double_sided) {
+    if (mrs.flags.make_double_sided)
         makeDoubleSided();
-    }
 
     size_t num_indices_old = indices.size();
     size_t num_points_old = points.size();
@@ -483,7 +458,7 @@ void Mesh::refine(const MeshRefineSettings& mrs)
     // refine
     {
         refiner.refine();
-        refiner.retopology(mrs.flags.swap_faces);
+        refiner.retopology(mrs.flags.flip_faces);
         refiner.genSubmeshes(material_ids);
 
         // remap vertex attributes
@@ -525,6 +500,7 @@ void Mesh::refine(const MeshRefineSettings& mrs)
 
         // setup submeshes
         {
+            submeshes.clear();
             int nsm = 0;
             int *tri = indices.data();
             for (auto& split : refiner.splits) {
@@ -565,19 +541,19 @@ void Mesh::refine(const MeshRefineSettings& mrs)
     }
 
     // velocities
-    if (!velocities.empty()) {
+    if (velocities.size()== num_points_old) {
         RawVector<float3> tmp_velocities;
         Remap(tmp_velocities, velocities, refiner.new2old_points);
         tmp_velocities.swap(velocities);
     }
 
     // bone weights
-    if (!weights4.empty()) {
+    if (weights4.size() == num_points_old) {
         RawVector<Weights4> tmp_weights;
         Remap(tmp_weights, weights4, refiner.new2old_points);
         weights4.swap(tmp_weights);
     }
-    if (!weights1.empty() && !bone_counts.empty() && !bone_offsets.empty()) {
+    if (!weights1.empty() && bone_counts.size() == num_points_old && bone_offsets.size() == num_points_old) {
         RawVector<uint8_t> tmp_bone_counts;
         RawVector<int> tmp_bone_offsets;
         RawVector<Weights1> tmp_weights;
@@ -923,7 +899,7 @@ void Mesh::applyMirror(const float3 & plane_n, float plane_d, bool /*welding*/)
                 mu::MirrorVectors(&f.normals[num_indices_old], num_additional_indices, plane_n);
             }
 
-            if (!f.tangents.size() == num_points_old) {
+            if (f.tangents.size() == num_points_old) {
                 f.tangents.resize(points.size());
                 mu::CopyWithIndices(&f.tangents[num_points_old], &f.tangents[0], copylist);
                 mu::MirrorVectors(&f.tangents[num_points_old], num_additional_points, plane_n);
@@ -957,53 +933,35 @@ void Mesh::setupBoneWeights4()
 
     int num_bones = (int)bones.size();
     int num_vertices = (int)points.size();
-    weights4.resize_discard(num_vertices);
+    weights4.resize_zeroclear(num_vertices);
 
-    auto search_weight = [this](int vi) {
-        // some DCC tools (mainly MotionBuilder) omit weight data if there are vertices with identical position. so find it.
-        auto& dst = weights4[vi];
-        auto beg = points.begin();
-        auto end = beg + vi;
-        auto it = std::find(beg, end, points[vi]);
-        if (it != end) {
-            // found
-            dst = weights4[std::distance(beg, it)];
+    RawVector<Weights1> tmp(num_bones);
+    for (int vi = 0; vi < num_vertices; ++vi) {
+        int num_influence = 0;
+        for (int bi = 0; bi < num_bones; ++bi) {
+            float w = bones[bi]->weights[vi];
+            if (w > 0.0f) {
+                tmp[num_influence].index = bi;
+                tmp[num_influence].weight = bones[bi]->weights[vi];
+                ++num_influence;
+            }
+        }
+        if (num_influence > 4) {
+            std::nth_element(&tmp[0], &tmp[4], &tmp[num_influence],
+                [&](auto& a, auto& b) { return a.weight > b.weight; });
+        }
+
+        int n = std::min(4, num_influence);
+        if (n == 0) {
+            // should do something?
         }
         else {
-            // not found. assign 1 to void divide-by-zero...
-            dst.weights[0] = 1.0f;
-        }
-    };
-
-    if (num_bones <= 4) {
-        weights4.zeroclear();
-        for (int vi = 0; vi < num_vertices; ++vi) {
             auto& w4 = weights4[vi];
-            for (int bi = 0; bi < num_bones; ++bi) {
-                w4.indices[bi] = bi;
-                w4.weights[bi] = bones[bi]->weights[vi];
-            }
-            if (w4.normalize() == 0.0f)
-                search_weight(vi);
-        }
-    }
-    else {
-        auto *tmp = (Weights1*)alloca(sizeof(Weights1) * num_bones);
-        for (int vi = 0; vi < num_vertices; ++vi) {
-            for (int bi = 0; bi < num_bones; ++bi) {
-                tmp[bi].index = bi;
-                tmp[bi].weight = bones[bi]->weights[vi];
-            }
-            std::nth_element(tmp, tmp + 4, tmp + num_bones,
-                [&](const Weights1& a, const Weights1& b) { return a.weight > b.weight; });
-
-            auto& w4 = weights4[vi];
-            for (int bi = 0; bi < 4; ++bi) {
+            for (int bi = 0; bi < n; ++bi) {
                 w4.indices[bi] = tmp[bi].index;
                 w4.weights[bi] = tmp[bi].weight;
             }
-            if (w4.normalize() == 0.0f)
-                search_weight(vi);
+            w4.normalize();
         }
     }
 }
@@ -1025,8 +983,7 @@ void Mesh::setupBoneWeightsVariable()
         for (int bi = 0; bi < num_bones; ++bi) {
             float weight = bones[bi]->weights[vi];
             if (weight > 0.0f) {
-                ++num_influence;
-                if (num_influence == 255)
+                if (++num_influence == 255)
                     break;
             }
         }
@@ -1035,23 +992,6 @@ void Mesh::setupBoneWeightsVariable()
         offset += num_influence;
     }
     weights1.resize_zeroclear(offset);
-
-    auto search_weight = [this](int vi) {
-        // some DCC tools (mainly MotionBuilder) omit weight data if there are vertices with identical position. so find it.
-        int n = bone_counts[vi];
-        auto *dst = &weights1[bone_offsets[vi]];
-        auto beg = points.begin();
-        auto end = beg + vi;
-        auto it = std::find(beg, end, points[vi]);
-        if (it != end) {
-            // found
-            weights1[bone_offsets[std::distance(beg, it)]].copy_to(dst, n);
-        }
-        else {
-            // not found. assign 1 to void divide-by-zero...
-            dst[0].weight = 1.0f;
-        }
-    };
 
     // calculate bone weights
     offset = 0;
@@ -1064,21 +1004,20 @@ void Mesh::setupBoneWeightsVariable()
                 auto& w1 = dst[num_influence];
                 w1.weight = weight;
                 w1.index = bi;
-
-                ++num_influence;
-                if (num_influence == 255)
+                if (++num_influence == 255)
                     break;
             }
         }
         offset += num_influence;
 
-        if (dst->normalize(num_influence) == 0.0f) {
-            search_weight(vi);
+        if (num_influence == 0) {
+            // should do something?
         }
         else {
-            // Unity require descending order of weights
+            dst->normalize(num_influence);
+            // Unity requires descending order of weights
             std::sort(dst, dst + num_influence,
-                [&](const Weights1& a, const Weights1& b) { return a.weight > b.weight; });
+                [&](auto& a, auto& b) { return a.weight > b.weight; });
         }
     }
 }

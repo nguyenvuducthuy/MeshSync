@@ -24,6 +24,7 @@
     </ClCompile>
     <ClCompile Include="MeshSyncClientMQ\MeshSyncClientMQ4.cpp" />
     <ClCompile Include="MeshSyncClientMQ\msmqContext.cpp" />
+    <ClCompile Include="MeshSyncClientMQ\msmqPluginBase.cpp" />
     <ClCompile Include="MeshSyncClientMQ\msmqUI4.cpp" />
     <ClCompile Include="MeshSyncClientMQ\msmqUtils.cpp" />
     <ClCompile Include="MeshSyncClientMQ\sdk_MQBasePlugin.cpp" />
@@ -38,6 +39,7 @@
     <ClInclude Include="MeshSyncClientMQ/pch.h" />
     <ClInclude Include="MeshSyncClientMQ\MeshSyncClientMQ4.h" />
     <ClInclude Include="MeshSyncClientMQ\msmqContext.h" />
+    <ClInclude Include="MeshSyncClientMQ\msmqPluginBase.h" />
     <ClInclude Include="MeshSyncClientMQ\msmqUI4.h" />
     <ClInclude Include="MeshSyncClientMQ\msmqUtils.h" />
   </ItemGroup>
@@ -71,7 +73,7 @@
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <PropertyGroup>
-    <IncludePath>$(SolutionDir);$(SolutionDir)External\mqsdk4$(MQ4_VERSION);$(SolutionDir)External\Poco\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(SolutionDir);$(SolutionDir)External\Poco\include;$(MQ4_SDK_DIR);$(IncludePath)</IncludePath>
     <OutDir>$(SolutionDir)_out\$(Platform)_$(Configuration)\$(ProjectName)$(MQ4_VERSION)\</OutDir>
     <IntDir>$(SolutionDir)_tmp\$(ProjectName)$(MQ4_VERSION)_$(Platform)_$(Configuration)\</IntDir>
   </PropertyGroup>

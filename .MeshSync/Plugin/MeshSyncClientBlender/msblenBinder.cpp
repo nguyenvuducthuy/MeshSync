@@ -1,7 +1,7 @@
 #include "pch.h"
-#include "MeshSyncClientBlender.h"
-#include "msbUtils.h"
-#include "msbBinder.h"
+#include "msblenContext.h"
+#include "msblenUtils.h"
+#include "msblenBinder.h"
 
 namespace blender
 {
@@ -34,8 +34,15 @@ Prop(BMaterial, use_nodes);
 Prop(BMaterial, active_node_material);
 
 Def(BCamera);
+Prop(BCamera, clip_start);
+Prop(BCamera, clip_end);
 Prop(BCamera, angle_x);
 Prop(BCamera, angle_y);
+Prop(BCamera, lens);
+Prop(BCamera, sensor_width);
+Prop(BCamera, sensor_height);
+Prop(BCamera, shift_x);
+Prop(BCamera, shift_y);
 
 Def(BScene);
 Prop(BScene, frame_start);
@@ -125,8 +132,15 @@ void setup(py::object bpy_context)
         else if (match_type("Camera")) {
             BCamera::s_type = type;
             each_prop{
+                if (match_prop("clip_start")) BCamera_clip_start = prop;
+                if (match_prop("clip_end")) BCamera_clip_end = prop;
                 if (match_prop("angle_x")) BCamera_angle_x = prop;
                 if (match_prop("angle_y")) BCamera_angle_y = prop;
+                if (match_prop("lens")) BCamera_lens = prop;
+                if (match_prop("sensor_width")) BCamera_sensor_width = prop;
+                if (match_prop("sensor_height")) BCamera_sensor_height = prop;
+                if (match_prop("shift_x")) BCamera_shift_x = prop;
+                if (match_prop("shift_y")) BCamera_shift_y = prop;
             }
         }
         else if (match_type("Material")) {
@@ -385,16 +399,16 @@ bool BID::is_updated_data() const
 const char *BObject::name() const { return ((BID)*this).name(); }
 void* BObject::data() { return m_ptr->data; }
 
-float4x4 BObject::matrix_local() const
+mu::float4x4 BObject::matrix_local() const
 {
-    float4x4 ret;
+    mu::float4x4 ret;
     get_float_array(m_ptr, (float*)&ret, BObject_matrix_local);
     return ret;
 }
 
-float4x4 BObject::matrix_world() const
+mu::float4x4 BObject::matrix_world() const
 {
-    float4x4 ret;
+    mu::float4x4 ret;
     get_float_array(m_ptr, (float*)&ret, BObject_matrix_world);
     return ret;
 }
@@ -460,10 +474,10 @@ barray_range<MVert> BMesh::vertices()
 {
     return { m_ptr->mvert, (size_t)m_ptr->totvert };
 }
-barray_range<float3> BMesh::normals()
+barray_range<mu::float3> BMesh::normals()
 {
     if (CustomData_number_of_layers(m_ptr->ldata, CD_NORMAL) > 0) {
-        auto data = (float3*)CustomData_get(m_ptr->ldata, CD_NORMAL);
+        auto data = (mu::float3*)CustomData_get(m_ptr->ldata, CD_NORMAL);
         if (data != nullptr)
             return { data, (size_t)m_ptr->totloop };
     }
@@ -518,9 +532,9 @@ const char *BMaterial::name() const
 {
     return m_ptr->id.name + 2;
 }
-const float3& BMaterial::color() const
+const mu::float3& BMaterial::color() const
 {
-    return (float3&)m_ptr->r;
+    return (mu::float3&)m_ptr->r;
 }
 bool BMaterial::use_nodes() const
 {
@@ -531,35 +545,20 @@ Material * BMaterial::active_node_material() const
     return (Material*)get_pointer(m_ptr, BMaterial_active_node_material);
 }
 
-float BCamera::fov_vertical() const
-{
-    return get_float(m_ptr, BCamera_angle_y);
-}
+float BCamera::clip_start() const { return get_float(m_ptr, BCamera_clip_start); }
+float BCamera::clip_end() const { return get_float(m_ptr, BCamera_clip_end); }
+float BCamera::angle_y() const { return get_float(m_ptr, BCamera_angle_y); }
+float BCamera::angle_x() const { return get_float(m_ptr, BCamera_angle_x); }
+float BCamera::lens() const { return get_float(m_ptr, BCamera_lens); }
+float BCamera::sensor_width() const { return get_float(m_ptr, BCamera_sensor_width); }
+float BCamera::sensor_height() const { return get_float(m_ptr, BCamera_sensor_height); }
+float BCamera::shift_x() const { return get_float(m_ptr, BCamera_shift_x); }
+float BCamera::shift_y() const { return get_float(m_ptr, BCamera_shift_y); }
 
-float blender::BCamera::fov_horizontal() const
-{
-    return get_float(m_ptr, BCamera_angle_x);
-}
-
-int BScene::fps()
-{
-    return m_ptr->r.frs_sec;
-}
-
-int BScene::frame_start()
-{
-    return get_int(m_ptr, BScene_frame_start);
-}
-
-int BScene::frame_end()
-{
-    return get_int(m_ptr, BScene_frame_end);
-}
-
-int BScene::frame_current()
-{
-    return get_int(m_ptr, BScene_frame_current);
-}
+int BScene::fps() { return m_ptr->r.frs_sec; }
+int BScene::frame_start() { return get_int(m_ptr, BScene_frame_start); }
+int BScene::frame_end() { return get_int(m_ptr, BScene_frame_end); }
+int BScene::frame_current() { return get_int(m_ptr, BScene_frame_current); }
 
 void BScene::frame_set(int f, float subf)
 {
@@ -653,7 +652,7 @@ int CustomData_get_offset(const CustomData& data, int type)
 }
 
 
-float3 BM_loop_calc_face_normal(const BMLoop& l)
+mu::float3 BM_loop_calc_face_normal(const BMLoop& l)
 {
     float r_normal[3];
     float v1[3], v2[3];
@@ -665,7 +664,7 @@ float3 BM_loop_calc_face_normal(const BMLoop& l)
     if (UNLIKELY(len == 0.0f)) {
         copy_v3_v3(r_normal, l.f->no);
     }
-    return (float3&)r_normal;
+    return (mu::float3&)r_normal;
 }
 
 std::string abspath(const std::string& path)

@@ -1,9 +1,9 @@
 #pragma once
 
-#define msReleaseDate 20190326
-#define msReleaseDateStr "20190326"
+#define msPluginVersion 20190423
+#define msPluginVersionStr "20190423"
 #define msVendor "Unity Technologies"
-#define msProtocolVersion 113
+#define msProtocolVersion 114
 //#define msEnableProfiling
 
 namespace mu {}

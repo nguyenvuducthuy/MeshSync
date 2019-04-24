@@ -129,8 +129,11 @@ msmodoInterface::~msmodoInterface()
     }
 }
 
-void msmodoInterface::prepare()
+bool msmodoInterface::prepare()
 {
+    if (!m_master_log.test()) {
+        m_svc_log.GetSubSystem(LXsLOG_LOGSYS, m_master_log);
+    }
     m_svc_layer.SetScene(0);
     m_svc_layer.Scene(m_current_scene);
     m_current_scene.GetChannels(m_ch_read, m_svc_selection.GetTime());
@@ -143,6 +146,7 @@ void msmodoInterface::prepare()
 
     if (tMaterial == 0) {
         tMaterial = m_svc_scene.ItemType(LXsITYPE_ADVANCEDMATERIAL);
+        tMask = m_svc_scene.ItemType(LXsITYPE_MASK);
 
         tLocator = m_svc_scene.ItemType(LXsITYPE_LOCATOR);
         tCamera = m_svc_scene.ItemType(LXsITYPE_CAMERA);
@@ -173,6 +177,7 @@ void msmodoInterface::prepare()
         m_timer_callback = new msmodoTimerCallbackVisitor(this);
         startTimer();
     }
+    return true;
 }
 
 void msmodoInterface::startTimer()
@@ -190,6 +195,38 @@ void msmodoInterface::onTimeChange() {}
 void msmodoInterface::onIdle() {}
 
 
+
+void msmodoInterface::logInfo(const char *format, ...)
+{
+    if (!m_master_log.test())
+        return;
+
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    m_svc_log.NewEntry(LXe_INFO, buf, m_log_entry);
+    m_master_log.AddEntry(m_log_entry);
+    va_end(args);
+}
+
+void msmodoInterface::logError(const char *format, ...)
+{
+    if (!m_master_log.test())
+        return;
+
+    const int MaxBuf = 2048;
+    char buf[MaxBuf];
+
+    va_list args;
+    va_start(args, format);
+    vsprintf(buf, format, args);
+    m_svc_log.NewEntry(LXe_WARNING, buf, m_log_entry);
+    m_master_log.AddEntry(m_log_entry);
+    va_end(args);
+}
 
 void msmodoInterface::setChannelReadTime(double time)
 {

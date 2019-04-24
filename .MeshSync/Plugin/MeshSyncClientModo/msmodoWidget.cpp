@@ -12,7 +12,7 @@
 #include <QAction>
 #include <QWidget>
 #include <QStackedWidget>
-#include <QCheckbox>
+#include <QCheckBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QLabel>
@@ -60,6 +60,7 @@ public slots:
 private:
     QWidget *m_widget_mesh = nullptr;
     QWidget *m_widget_kfoptions = nullptr;
+    QCheckBox *m_ck_auto_sync = nullptr;
 };
 
 
@@ -82,6 +83,14 @@ static inline QString to_qstring(const std::string& v)
 static inline Qt::CheckState to_qcheckstate(bool v)
 {
     return v ? Qt::Checked : Qt::Unchecked;
+}
+static inline std::string to_stdstring(const QString& v)
+{
+    // note: on linux, QString::toStdString() returns incorrect result.
+    // QByteArray::length() seems return wrong value. so we reimplement toStdString() with std::strlen()
+    auto raw = v.toAscii();
+    auto *data = raw.constData();
+    return std::string(data, std::strlen(data));
 }
 
 msmodoSettingsWidget::msmodoSettingsWidget(QWidget *parent)
@@ -140,16 +149,6 @@ msmodoSettingsWidget::msmodoSettingsWidget(QWidget *parent)
         layout_mesh->setVerticalSpacing(2);
         layout_mesh->setContentsMargins(10, 0, 0, 0);
 
-        auto ck_bones = new QCheckBox("Sync Joints");
-        ck_bones->setCheckState(to_qcheckstate(settings.sync_bones));
-        layout_mesh->addWidget(ck_bones, iy2++, 0);
-        connect(ck_bones, SIGNAL(stateChanged(int)), this, SLOT(onToggleSyncBones(int)));
-
-        auto ck_blendshapes = new QCheckBox("Sync Morphs");
-        ck_blendshapes->setCheckState(to_qcheckstate(settings.sync_blendshapes));
-        layout_mesh->addWidget(ck_blendshapes, iy2++, 0);
-        connect(ck_blendshapes, SIGNAL(stateChanged(int)), this, SLOT(onToggleSyncBlendshapes(int)));
-
         auto ck_bake_deformers = new QCheckBox("Bake Deformers");
         ck_bake_deformers->setCheckState(to_qcheckstate(settings.bake_deformers));
         layout_mesh->addWidget(ck_bake_deformers, iy2++, 0);
@@ -167,6 +166,16 @@ msmodoSettingsWidget::msmodoSettingsWidget(QWidget *parent)
 
     // other components
     {
+        auto ck_bones = new QCheckBox("Sync Joints");
+        ck_bones->setCheckState(to_qcheckstate(settings.sync_bones));
+        layout->addWidget(ck_bones, iy++, 0);
+        connect(ck_bones, SIGNAL(stateChanged(int)), this, SLOT(onToggleSyncBones(int)));
+
+        auto ck_blendshapes = new QCheckBox("Sync Morphs");
+        ck_blendshapes->setCheckState(to_qcheckstate(settings.sync_blendshapes));
+        layout->addWidget(ck_blendshapes, iy++, 0);
+        connect(ck_blendshapes, SIGNAL(stateChanged(int)), this, SLOT(onToggleSyncBlendshapes(int)));
+
         auto ck_textures = new QCheckBox("Sync Textures");
         ck_textures->setCheckState(to_qcheckstate(settings.sync_textures));
         layout->addWidget(ck_textures, iy++, 0, 1, 3);
@@ -194,11 +203,11 @@ msmodoSettingsWidget::msmodoSettingsWidget(QWidget *parent)
     }
 
     {
-        auto ck_auto_sync = new QCheckBox("Auto Sync");
-        ck_auto_sync->setContentsMargins(0, space, 0, 0);
-        ck_auto_sync->setCheckState(to_qcheckstate(settings.auto_sync));
-        layout->addWidget(ck_auto_sync, iy++, 0, 1, 3);
-        connect(ck_auto_sync, SIGNAL(stateChanged(int)), this, SLOT(onToggleAutoSync(int)));
+        m_ck_auto_sync = new QCheckBox("Auto Sync");
+        m_ck_auto_sync->setContentsMargins(0, space, 0, 0);
+        m_ck_auto_sync->setCheckState(to_qcheckstate(settings.auto_sync));
+        layout->addWidget(m_ck_auto_sync, iy++, 0, 1, 3);
+        connect(m_ck_auto_sync, SIGNAL(stateChanged(int)), this, SLOT(onToggleAutoSync(int)));
 
         auto bu_manual_sync = new QPushButton("Manual Sync");
         layout->addWidget(bu_manual_sync, iy++, 0, 1, 3);
@@ -252,19 +261,28 @@ msmodoSettingsWidget::msmodoSettingsWidget(QWidget *parent)
     }
 
     {
-        auto lb_version = new QLabel("Plugin Version: " msReleaseDateStr);
+        auto lb_version = new QLabel("Plugin Version: " msPluginVersionStr);
         lb_version->setContentsMargins(0, space, 0, 0);
         layout->addWidget(lb_version, iy++, 0, 1, 3);
     }
     setLayout(layout);
 }
 
-#define msmodoSendScene() msmodoGetInstance().sendScene(msmodoContext::SendScope::All, true)
+
+static bool msmodoSendObjects()
+{
+    return msmodoExport(msmodoContext::SendTarget::Objects, msmodoContext::SendScope::All);
+}
+
+static bool msmodoSendAnimations()
+{
+    return msmodoExport(msmodoContext::SendTarget::Animations, msmodoContext::SendScope::All);
+}
 
 void msmodoSettingsWidget::onEditServer(const QString& v)
 {
     auto& settings = msmodoGetSettings();
-    settings.client_settings.server = v.toStdString();
+    settings.client_settings.server = to_stdstring(v);
 }
 
 void msmodoSettingsWidget::onEditPort(const QString& v)
@@ -285,7 +303,7 @@ void msmodoSettingsWidget::onEditScaleFactor(const QString& v)
     if (ok && val != 0.0f && settings.scale_factor != val) {
         settings.scale_factor = val;
         if (settings.auto_sync)
-            msmodoSendScene();
+            msmodoSendObjects();
     }
 }
 
@@ -295,7 +313,7 @@ void msmodoSettingsWidget::onToggleSyncMeshes(int v)
     settings.sync_meshes = v;
     m_widget_mesh->setShown(settings.sync_meshes);
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncBones(int v)
@@ -303,7 +321,7 @@ void msmodoSettingsWidget::onToggleSyncBones(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_bones = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncBlendshapes(int v)
@@ -311,7 +329,7 @@ void msmodoSettingsWidget::onToggleSyncBlendshapes(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_blendshapes = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleBakeDeformers(int v)
@@ -319,7 +337,7 @@ void msmodoSettingsWidget::onToggleBakeDeformers(int v)
     auto& settings = msmodoGetSettings();
     settings.bake_deformers = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleDoubleSided(int v)
@@ -327,7 +345,7 @@ void msmodoSettingsWidget::onToggleDoubleSided(int v)
     auto& settings = msmodoGetSettings();
     settings.make_double_sided = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncTextures(int v)
@@ -341,7 +359,7 @@ void msmodoSettingsWidget::onToggleSyncMeshInstances(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_mesh_instances = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncReplicators(int v)
@@ -349,7 +367,7 @@ void msmodoSettingsWidget::onToggleSyncReplicators(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_replicators = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncCameras(int v)
@@ -357,7 +375,7 @@ void msmodoSettingsWidget::onToggleSyncCameras(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_cameras = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleSyncLights(int v)
@@ -365,20 +383,31 @@ void msmodoSettingsWidget::onToggleSyncLights(int v)
     auto& settings = msmodoGetSettings();
     settings.sync_lights = v;
     if (settings.auto_sync)
-        msmodoSendScene();
+        msmodoSendObjects();
 }
 
 void msmodoSettingsWidget::onToggleAutoSync(int v)
 {
+    auto& ctx = msmodoGetContext();
     auto& settings = msmodoGetSettings();
-    settings.auto_sync = v;
-    if (v)
-        msmodoSendScene();
+    if (v) {
+        if (ctx.isServerAvailable()) {
+            settings.auto_sync = true;
+            msmodoSendObjects();
+        }
+        else {
+            ctx.logError("MeshSync: Server not available. %s", ctx.getErrorMessage().c_str());
+            m_ck_auto_sync->setCheckState(to_qcheckstate(false));
+        }
+    }
+    else {
+        settings.auto_sync = false;
+    }
 }
 
 void msmodoSettingsWidget::onClickManualSync(bool v)
 {
-    msmodoSendScene();
+    msmodoSendObjects();
 }
 
 
@@ -417,7 +446,7 @@ void msmodoSettingsWidget::onToggleKeepFlatCurves(int v)
 
 void msmodoSettingsWidget::onClickSyncAnimations(bool v)
 {
-    msmodoGetInstance().sendAnimations(msmodoContext::SendScope::All);
+    msmodoSendAnimations();
 }
 
 

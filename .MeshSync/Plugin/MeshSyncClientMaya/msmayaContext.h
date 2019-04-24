@@ -61,7 +61,7 @@ struct TreeNode : public mu::noncopyable
     std::vector<TreeNode*> children;
 
     ms::TransformPtr dst_obj;
-    ms::AnimationPtr dst_anim;
+    ms::TransformAnimationPtr dst_anim;
     TransformData transform_data;
     ms::float4x4 model_transform;
     ms::float4x4 maya_transform;
@@ -69,57 +69,62 @@ struct TreeNode : public mu::noncopyable
     ms::Identifier getIdentifier() const;
     void clearState();
     bool isInstance() const;
+    bool isPrimaryInstance() const;
     TreeNode* getPrimaryInstanceNode() const;
 
     MDagPath getDagPath(bool include_shape = true) const;
     void getDagPath_(MDagPath& dst) const;
     MObject getTrans() const;
     MObject getShape() const;
+    bool isVisibleInHierarchy() const;
 };
 using TreeNodePtr = std::unique_ptr<TreeNode>;
 
-MDagPath GetDagPath(const TreeNode *branch, const MObject& node);
-TreeNode* FindBranch(const DAGNodeMap& dnmap, const MDagPath& dagpath);
 
+struct msmayaSettings
+{
+    ms::ClientSettings client_settings;
 
-class MeshSyncClientMaya
+    float scale_factor = 0.01f;
+    float animation_time_scale = 1.0f;
+    float animation_sps = 3.0f;
+    int  timeout_ms = 5000;
+    bool auto_sync = false;
+    bool sync_meshes = true;
+    bool sync_normals = true;
+    bool sync_uvs = true;
+    bool sync_colors = true;
+    bool make_double_sided = false;
+    bool bake_deformers = false;
+    bool apply_tweak = false;
+    bool sync_blendshapes = true;
+    bool sync_bones = true;
+    bool sync_textures = true;
+    bool sync_cameras = true;
+    bool sync_lights = true;
+    bool sync_constraints = false;
+    bool remove_namespace = true;
+    bool reduce_keyframes = true;
+    bool keep_flat_curves = false;
+    bool multithreaded = false;
+    bool fbx_compatible_transform = true;
+
+    // import settings
+    bool bake_skin = false;
+    bool bake_cloth = false;
+};
+
+class msmayaContext
 {
 public:
-    struct Settings
+    enum class SendTarget : int
     {
-        ms::ClientSettings client_settings;
-
-        float scale_factor = 0.01f;
-        float animation_time_scale = 1.0f;
-        float animation_sps = 2.0f;
-        int  timeout_ms = 5000;
-        bool auto_sync = false;
-        bool sync_meshes = true;
-        bool sync_normals = true;
-        bool sync_uvs = true;
-        bool sync_colors = true;
-        bool make_double_sided = false;
-        bool bake_deformers = false;
-        bool apply_tweak = false;
-        bool sync_blendshapes = true;
-        bool sync_bones = true;
-        bool sync_textures = true;
-        bool sync_cameras = true;
-        bool sync_lights = true;
-        bool sync_constraints = false;
-        bool remove_namespace = true;
-        bool reduce_keyframes = true;
-        bool keep_flat_curves = false;
-        bool multithreaded = false;
-        bool fbx_compatible_transform = true;
-
-        // import settings
-        bool bake_skin = false;
-        bool bake_cloth = false;
+        Objects,
+        Materials,
+        Animations,
+        Everything,
     };
-    Settings m_settings;
-
-    enum class SendScope
+    enum class SendScope : int
     {
         None,
         All,
@@ -127,10 +132,11 @@ public:
         Selected,
     };
 
-    static MeshSyncClientMaya& getInstance();
+    static msmayaContext& getInstance();
+    msmayaSettings& getSettings();
 
-    MeshSyncClientMaya(MObject obj);
-    ~MeshSyncClientMaya();
+    msmayaContext(MObject obj);
+    ~msmayaContext();
 
     void onNodeUpdated(const MObject& node);
     void onNodeRemoved(const MObject& node);
@@ -140,15 +146,22 @@ public:
     void onSceneLoadEnd();
     void onTimeChange(const MTime& time);
 
+
+    void logInfo(const char *format, ...);
+    void logError(const char *format, ...);
+    bool isServerAvailable();
+    const std::string& getErrorMessage();
+
+    void wait();
     void update();
-    bool sendScene(SendScope scope, bool dirty_all);
+    bool sendMaterials(bool dirty_all);
+    bool sendObjects(SendScope scope, bool dirty_all);
     bool sendAnimations(SendScope scope);
 
-    bool recvScene();
+    bool recvObjects();
 
 
 private:
-
     struct TaskRecord : public mu::noncopyable
     {
         using task_t = std::function<void()>;
@@ -161,27 +174,20 @@ private:
 
     struct AnimationRecord : public mu::noncopyable
     {
-        using extractor_t = void (MeshSyncClientMaya::*)(ms::Animation& dst, TreeNode *n);
+        using extractor_t = void (msmayaContext::*)(ms::TransformAnimation& dst, TreeNode *n);
 
         TreeNode *tn = nullptr;
-        ms::Animation *dst = nullptr;
+        ms::TransformAnimationPtr dst;
         extractor_t extractor = nullptr;
 
-        void operator()(MeshSyncClientMaya *_this);
+        void operator()(msmayaContext *_this);
     };
     using AnimationRecords = std::map<TreeNode*, AnimationRecord>;
-
-    std::vector<TreeNodePtr> m_tree_nodes;
-    std::vector<TreeNode*>   m_tree_roots;
-    DAGNodeMap               m_dag_nodes;
-    TaskRecords              m_extract_tasks;
-    AnimationRecords         m_anim_records;
 
     std::string handleNamespace(const std::string& path);
 
     void constructTree();
     void constructTree(const MObject& node, TreeNode *parent, const std::string& base);
-    bool checkRename(TreeNode *node);
 
     void registerGlobalCallbacks();
     void registerNodeCallbacks();
@@ -191,9 +197,10 @@ private:
     int exportTexture(const std::string& path, ms::TextureType type = ms::TextureType::Default);
     void exportMaterials();
 
-    ms::TransformPtr exportObject(TreeNode *n, bool force);
+    ms::TransformPtr exportObject(TreeNode *n, bool parent, bool tip = true);
     template<class T> std::shared_ptr<T> createEntity(TreeNode& n);
     ms::TransformPtr exportTransform(TreeNode *n);
+    ms::TransformPtr exportInstance(TreeNode *n);
     ms::CameraPtr exportCamera(TreeNode *n);
     ms::LightPtr exportLight(TreeNode *n);
     ms::MeshPtr exportMesh(TreeNode *n);
@@ -204,25 +211,32 @@ private:
 
     void extractTransformData(TreeNode *n, mu::float3& pos, mu::quatf& rot, mu::float3& scale, bool& vis);
     void extractCameraData(TreeNode *n, bool& ortho, float& near_plane, float& far_plane, float& fov,
-        float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance);
+        float& focal_length, mu::float2& sensor_size, mu::float2& lens_shift);
     void extractLightData(TreeNode *n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& spot_angle);
 
     int exportAnimations(SendScope scope);
     bool exportAnimation(TreeNode *tn, bool force);
-    void extractTransformAnimationData(ms::Animation& dst, TreeNode *n);
-    void extractCameraAnimationData(ms::Animation& dst, TreeNode *n);
-    void extractLightAnimationData(ms::Animation& dst, TreeNode *n);
-    void extractMeshAnimationData(ms::Animation& dst, TreeNode *n);
+    void extractTransformAnimationData(ms::TransformAnimation& dst, TreeNode *n);
+    void extractCameraAnimationData(ms::TransformAnimation& dst, TreeNode *n);
+    void extractLightAnimationData(ms::TransformAnimation& dst, TreeNode *n);
+    void extractMeshAnimationData(ms::TransformAnimation& dst, TreeNode *n);
 
     void kickAsyncSend();
 
 private:
-    MObject                     m_obj;
-    MFnPlugin                   m_iplugin;
-    std::vector<MCallbackId>    m_cids_global;
+    msmayaSettings m_settings;
 
-    std::vector<ms::AnimationClipPtr>   m_animations;
+    MObject m_obj;
+    MFnPlugin m_iplugin;
+    std::vector<MCallbackId> m_cids_global;
 
+    std::vector<TreeNodePtr> m_tree_nodes;
+    std::vector<TreeNode*>   m_tree_roots;
+    DAGNodeMap               m_dag_nodes;
+    TaskRecords              m_extract_tasks;
+    AnimationRecords         m_anim_records;
+
+    std::vector<ms::AnimationClipPtr> m_animations;
     ms::IDGenerator<MObject> m_material_ids;
     ms::TextureManager m_texture_manager;
     ms::MaterialManager m_material_manager;
@@ -235,3 +249,6 @@ private:
     int       m_index_seed = 0;
     float     m_anim_time = 0.0f;
 };
+
+#define msmayaGetContext() msmayaContext::getInstance()
+#define msmayaGetSettings() msmayaGetContext().getSettings()

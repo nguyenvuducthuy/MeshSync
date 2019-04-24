@@ -95,7 +95,7 @@ public:
         auto& settings = msmodoGetSettings();
 #define Handler(Name, Type, Member, Sync)\
         if(getArg(Name, Member) && settings.auto_sync && Sync)\
-            msmodoGetInstance().sendScene(msmodoContext::SendScope::All, true);
+            msmodoGetContext().sendObjects(msmodoContext::SendScope::All, true);
 
         EachParam(Handler)
 #undef Handler
@@ -118,6 +118,7 @@ public:
             pop->popup_add("Materials");
             pop->popup_add("Animations");
             pop->popup_add("Everything");
+            static_assert((int)msmodoContext::SendTarget::Everything == 3, "SendTarget enum and uivalue mismatch");
             return pop;
         }
     };
@@ -130,30 +131,9 @@ public:
 
     void execute() override
     {
-        int target;
-        cmd_read_arg("target", target);
-
-        auto& inst = msmodoGetInstance();
-        if (target == 3) { // everything
-            inst.wait();
-            inst.sendMaterials(true);
-            inst.wait();
-            inst.sendScene(msmodoContext::SendScope::All, true);
-            inst.wait();
-            inst.sendAnimations(msmodoContext::SendScope::All);
-        }
-        if (target == 2) { // animations
-            inst.wait();
-            inst.sendAnimations(msmodoContext::SendScope::All);
-        }
-        if (target == 1) { // materials
-            inst.wait();
-            inst.sendMaterials(true);
-        }
-        else { // objects
-            inst.wait();
-            inst.sendScene(msmodoContext::SendScope::All, true);
-        }
+        auto target = msmodoContext::SendTarget::Objects;
+        cmd_read_arg("target", (int&)target);
+        msmodoExport(target, msmodoContext::SendScope::All);
     }
 };
 
@@ -163,7 +143,7 @@ class msmodoCmdImport : public CLxCommand
 public:
     void execute() override
     {
-        msmodoGetInstance().recvScene();
+        msmodoGetContext().recvObjects();
     }
 };
 
@@ -210,7 +190,14 @@ public:
 
 void initialize(void)
 {
-    auto cmd = new CLxPolymorph<msmodoView>();
-    cmd->AddInterface(new CLxIfc_CustomView<msmodoView>());
-    lx::AddServer(msmodoViewName, cmd);
+    {
+        auto view = new CLxPolymorph<msmodoView>();
+        view->AddInterface(new CLxIfc_CustomView<msmodoView>());
+        lx::AddServer(msmodoViewName, view);
+    }
+}
+
+void cleanup()
+{
+    msmodoContext::finalizeInstance();
 }

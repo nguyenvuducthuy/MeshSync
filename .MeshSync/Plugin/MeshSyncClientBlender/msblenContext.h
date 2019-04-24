@@ -2,14 +2,14 @@
 #include "MeshUtils/MeshUtils.h"
 #include "MeshSync/MeshSync.h"
 #include "MeshSync/MeshSyncUtils.h"
-#include "msbBinder.h"
+#include "msblenBinder.h"
 
-struct msbSettings;
-class msbContext;
+struct msblenSettings;
+class msblenContext;
 namespace bl = blender;
 
 
-struct msbSettings
+struct msblenSettings
 {
     ms::ClientSettings client_settings;
     ms::SceneSettings scene_settings;
@@ -36,10 +36,17 @@ struct msbSettings
 };
 
 
-class msbContext : public std::enable_shared_from_this<msbContext>
+class msblenContext : public std::enable_shared_from_this<msblenContext>
 {
 public:
-    enum class SendScope
+    enum class SendTarget : int
+    {
+        Objects,
+        Materials,
+        Animations,
+        Everything,
+    };
+    enum class SendScope : int
     {
         None,
         All,
@@ -47,16 +54,23 @@ public:
         Selected,
     };
 
-    msbContext();
-    ~msbContext();
+    msblenContext();
+    ~msblenContext();
 
-    msbSettings&        getSettings();
-    const msbSettings&  getSettings() const;
+    msblenSettings&        getSettings();
+    const msblenSettings&  getSettings() const;
 
+    void logInfo(const char *format, ...);
+    bool isServerAvailable();
+    const std::string& getErrorMessage();
+
+    void wait();
     void clear();
     bool prepare();
-    void sendScene(SendScope scope, bool force_all);
-    void sendAnimations(SendScope scope);
+
+    bool sendMaterials(bool dirty_all);
+    bool sendObjects(SendScope scope, bool dirty_all);
+    bool sendAnimations(SendScope scope);
     void flushPendingList();
 
 private:
@@ -75,13 +89,13 @@ private:
 
     struct AnimationRecord : public mu::noncopyable
     {
-        using extractor_t = void (msbContext::*)(ms::Animation& dst, void *obj);
+        using extractor_t = void (msblenContext::*)(ms::TransformAnimation& dst, void *obj);
 
         void *obj = nullptr;
-        ms::Animation *dst = nullptr;
+        ms::TransformAnimationPtr dst;
         extractor_t extractor = nullptr;
 
-        void operator()(msbContext *_this)
+        void operator()(msblenContext *_this)
         {
             (_this->*extractor)(*dst, obj);
         }
@@ -90,12 +104,12 @@ private:
     int exportTexture(const std::string & path, ms::TextureType type);
     void exportMaterials();
 
-    ms::TransformPtr exportObject(Object *obj, bool force);
+    ms::TransformPtr exportObject(Object *obj, bool parent, bool tip = true);
     ms::TransformPtr exportTransform(Object *obj);
     ms::TransformPtr exportPose(Object *armature, bPoseChannel *obj);
     ms::TransformPtr exportArmature(Object *obj);
-    ms::TransformPtr exportReference(Object *obj, const std::string& base_path);
-    ms::TransformPtr exportDupliGroup(Object *obj, const std::string& base_path);
+    ms::TransformPtr exportReference(Object *obj, Object *host, const std::string& base_path);
+    ms::TransformPtr exportDupliGroup(Object *obj, Object *host, const std::string& base_path);
     ms::CameraPtr exportCamera(Object *obj);
     ms::LightPtr exportLight(Object *obj);
     ms::MeshPtr exportMesh(Object *obj);
@@ -105,23 +119,23 @@ private:
     void doExtractEditMeshData(ms::Mesh& dst, Object *obj, Mesh *data);
 
     ms::TransformPtr findBone(Object *armature, Bone *bone);
-    ObjectRecord& touchRecord(Object *obj, const std::string& base_path="");
+    ObjectRecord& touchRecord(Object *obj, const std::string& base_path = "", bool children = false);
     void eraseStaleObjects();
 
-    void exportAnimation(Object *obj, bool force, const std::string base_path="");
-    void extractTransformAnimationData(ms::Animation& dst, void *obj);
-    void extractPoseAnimationData(ms::Animation& dst, void *obj);
-    void extractCameraAnimationData(ms::Animation& dst, void *obj);
-    void extractLightAnimationData(ms::Animation& dst, void *obj);
-    void extractMeshAnimationData(ms::Animation& dst, void *obj);
+    void exportAnimation(Object *obj, bool force, const std::string base_path = "");
+    void extractTransformAnimationData(ms::TransformAnimation& dst, void *obj);
+    void extractPoseAnimationData(ms::TransformAnimation& dst, void *obj);
+    void extractCameraAnimationData(ms::TransformAnimation& dst, void *obj);
+    void extractLightAnimationData(ms::TransformAnimation& dst, void *obj);
+    void extractMeshAnimationData(ms::TransformAnimation& dst, void *obj);
 
     void kickAsyncSend();
 
 private:
-    msbSettings m_settings;
+    msblenSettings m_settings;
     std::set<Object*> m_pending;
     std::map<Bone*, ms::TransformPtr> m_bones;
-    std::map<void*, ObjectRecord> m_obj_records;
+    std::map<void*, ObjectRecord> m_obj_records; // key can be object or bone
     std::vector<std::future<void>> m_async_tasks;
     std::vector<Mesh*> m_tmp_meshes;
 
@@ -133,9 +147,8 @@ private:
     ms::AsyncSceneSender m_sender;
 
     // animation export
-    using AnimationRecords = std::map<std::string, AnimationRecord>;
-    AnimationRecords m_anim_records;
+    std::map<std::string, AnimationRecord> m_anim_records;
     float m_anim_time = 0.0f;
-    bool m_sending_animations = false;
+    bool m_ignore_events = false;
 };
-using msbContextPtr = std::shared_ptr<msbContext>;
+using msbContextPtr = std::shared_ptr<msblenContext>;

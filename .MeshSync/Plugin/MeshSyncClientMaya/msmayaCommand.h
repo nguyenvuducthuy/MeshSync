@@ -7,6 +7,17 @@
 #endif
 
 
+class CmdServerStatus: public MPxCommand
+{
+public:
+    static void* create();
+    static const char* name();
+    static MSyntax createSyntax();
+
+    MStatus doIt(const MArgList& args) override;
+    LT_PAD64;
+};
+
 class CmdSettings : public MPxCommand
 {
 public:
@@ -41,6 +52,7 @@ public:
 };
 
 #define EachCommand(Body)\
+    Body(CmdServerStatus)\
     Body(CmdSettings)\
     Body(CmdExport)\
     Body(CmdImport)

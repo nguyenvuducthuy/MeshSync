@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "msmbUtils.h"
+#include "msmobuUtils.h"
 
 bool IsNull(FBModel * src)
 {
@@ -27,6 +27,13 @@ bool IsMesh(FBModel* src)
     return src && src->ModelVertexData;
 }
 
+bool IsVisibleInHierarchy(FBModel *src)
+{
+    if (src->VisibilityInheritance && src->Parent && !IsVisibleInHierarchy(src->Parent))
+        return false;
+    return src->Visibility;
+}
+
 const char* GetName(FBModel *src)
 {
     return src->LongName;
@@ -50,7 +57,8 @@ std::tuple<double, double> GetTimeRange(FBTake *take)
 
 static void EnumerateAllNodesImpl(FBModel *node, const std::function<void(FBModel*)>& body)
 {
-    body(node);
+    if (IsCamera(node) || IsLight(node) || IsMesh(node))
+        body(node);
 
     int num_children = node->Children.GetCount();
     for (int i = 0; i < num_children; i++)
@@ -106,10 +114,10 @@ static void DbgPrintAnimationNodeRecursive(FBAnimationNode * node, int depth = 0
     const char *fullname = node->GetFullName();
     const char *classname = node->ClassName();
 
-    double value;
-    node->ReadData(&value);
+    double values[16];
+    node->ReadData(values);
     mu::Print("%sAnimationNode %s : %lf (classname:%s fullname:%s namespace:%s folder:%s)\n",
-        indent, name, value, classname, fullname, ns, folder);
+        indent, name, values[0], classname, fullname, ns, folder);
 
     Each(node->Nodes, [depth](FBAnimationNode *n) {
         DbgPrintAnimationNodeRecursive(n, depth + 1);

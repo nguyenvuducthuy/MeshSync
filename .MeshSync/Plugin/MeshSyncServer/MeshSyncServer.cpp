@@ -9,9 +9,13 @@ using ms::ServerPtr;
 static std::map<uint16_t, ServerPtr> g_servers;
 
 #pragma region Server
-msAPI const char* msServerGetVersion()
+msAPI int msGetPluginVersion()
 {
-    return msReleaseDateStr;
+    return msPluginVersion;
+}
+msAPI int msGetProtocolVersion()
+{
+    return msProtocolVersion;
 }
 
 msAPI ms::Server* msServerStart(const ms::ServerSettings *settings)
@@ -211,70 +215,56 @@ msAPI void msMaterialAddKeyword(ms::Material *self, const char *name, bool v) { 
 
 
 #pragma region Animations
-using tvp_b = ms::TVP<bool>;
-using tvp_f = ms::TVP<float>;
-using tvp_f3 = ms::TVP<float3>;
-using tvp_f4 = ms::TVP<float4>;
-using tvp_q = ms::TVP<quatf>;
+msAPI const char*   msCurveGetName(ms::AnimationCurve *self) { return self->name.c_str(); }
+msAPI int           msCurveGetDataType(ms::AnimationCurve *self) { return (int)self->data_type; }
+msAPI int           msCurveGetDataFlags(ms::AnimationCurve *self) { return (int&)self->data_flags; }
+msAPI int           msCurveGetNumSamples(ms::AnimationCurve *self) { return self ? (int)self->size() : 0; }
+msAPI const char* msCurveGetBlendshapeName(ms::AnimationCurve *self)
+{
+    static const size_t s_name_pos = std::strlen(mskMeshBlendshape) + 1; // +1 for trailing '.'
+    if (ms::StartWith(self->name, mskMeshBlendshape))
+        return &self->name[s_name_pos];
+    return "";
+}
+
+msAPI const char*           msAnimationGetPath(ms::Animation *self) { return self->path.c_str(); }
+msAPI int                   msAnimationGetEntityType(ms::Animation *self) { return (int)self->entity_type; }
+msAPI int                   msAnimationGetNumCurves(ms::Animation *self) { return (int)self->curves.size(); }
+msAPI ms::AnimationCurve*   msAnimationGetCurve(ms::Animation *self, int i) { return self->curves[i].get(); }
+msAPI ms::AnimationCurve*   msAnimationFindCurve(ms::Animation *self, const char *name) { return self->findCurve(name).get(); }
+
+#define DefGetCurve(Name) msAPI ms::AnimationCurve* msAnimationGet##Name(ms::Animation *self) { return self->findCurve(msk##Name).get(); }
+DefGetCurve(TransformTranslation) // -> msAnimationGetTransformTranslation
+DefGetCurve(TransformRotation)
+DefGetCurve(TransformScale)
+DefGetCurve(TransformVisible)
+
+DefGetCurve(CameraFieldOfView)
+DefGetCurve(CameraNearPlane)
+DefGetCurve(CameraFarPlane)
+DefGetCurve(CameraFocalLength)
+DefGetCurve(CameraSensorSize)
+DefGetCurve(CameraLensShift)
+
+DefGetCurve(LightColor)
+DefGetCurve(LightIntensity)
+DefGetCurve(LightRange)
+DefGetCurve(LightSpotAngle)
+
+DefGetCurve(PointsTime)
+#undef DefGetCurve
+
+using msCurveCallback = void(*)(ms::AnimationCurve *curve);
+
+msAPI void msAnimationEachBlendshapeCurves(ms::Animation *self, msCurveCallback cb)
+{
+    ms::MeshAnimation::EachBlendshapeCurves(*self, [cb](ms::AnimationCurvePtr& curve) {
+        cb(curve.get());
+    });
+}
 
 msAPI int               msAnimationClipGetNumAnimations(ms::AnimationClip *self) { return (int)self->animations.size(); }
 msAPI ms::Animation*    msAnimationClipGetAnimationData(ms::AnimationClip *self, int i) { return self->animations[i].get(); }
-
-msAPI const char* msAnimationGetPath(ms::Animation *self) { return self->path.c_str(); }
-msAPI ms::Animation::Type msAnimationGetType(ms::Animation *self) { return self->getType(); }
-
-msAPI int   msTransformAGetNumTranslationSamples(ms::TransformAnimation *self) { return self ? (int)self->translation.size() : 0; }
-msAPI void  msTransformAGetTranslationSample(ms::TransformAnimation *self, int i, tvp_f3 *dst) { *dst = self->translation[i]; }
-
-msAPI int   msTransformAGetNumRotationSamples(ms::TransformAnimation *self) { return self ? (int)self->rotation.size() : 0; }
-msAPI void  msTransformAGetRotationSample(ms::TransformAnimation *self, int i, tvp_q *dst) { *dst = self->rotation[i]; }
-
-msAPI int   msTransformAGetNumScaleSamples(ms::TransformAnimation *self) { return self ? (int)self->scale.size() : 0; }
-msAPI void  msTransformAGetScaleSample(ms::TransformAnimation *self, int i, tvp_f3 *dst) { *dst = self->scale[i]; }
-
-msAPI int   msTransformAGetNumVisibleSamples(ms::TransformAnimation *self) { return self ? (int)self->visible.size() : 0; }
-msAPI void  msTransformAGetVisibleSample(ms::TransformAnimation *self, int i, tvp_b *dst) { *dst = self->visible[i]; }
-
-msAPI int   msCameraAGetNumFovSamples(ms::CameraAnimation *self) { return self ? (int)self->fov.size() : 0; }
-msAPI void  msCameraAGetFovSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->fov[i]; }
-
-msAPI int   msCameraAGetNumNearSamples(ms::CameraAnimation *self) { return self ? (int)self->near_plane.size() : 0; }
-msAPI void  msCameraAGetNearSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->near_plane[i]; }
-
-msAPI int   msCameraAGetNumFarSamples(ms::CameraAnimation *self) { return self ? (int)self->far_plane.size() : 0; }
-msAPI void  msCameraAGetFarSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->far_plane[i]; }
-
-msAPI int   msCameraAGetNumHApertureSamples(ms::CameraAnimation *self) { return self ? (int)self->horizontal_aperture.size() : 0; }
-msAPI void  msCameraAGetHApertureSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->horizontal_aperture[i]; }
-
-msAPI int   msCameraAGetNumVApertureSamples(ms::CameraAnimation *self) { return self ? (int)self->vertical_aperture.size() : 0; }
-msAPI void  msCameraAGetVApertureSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->vertical_aperture[i]; }
-
-msAPI int   msCameraAGetNumFocalLengthSamples(ms::CameraAnimation *self) { return self ? (int)self->focal_length.size() : 0; }
-msAPI void  msCameraAGetFocalLengthSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->focal_length[i]; }
-
-msAPI int   msCameraAGetNumFocusDistanceSamples(ms::CameraAnimation *self) { return self ? (int)self->focus_distance.size() : 0; }
-msAPI void  msCameraAGetFocusDistanceSample(ms::CameraAnimation *self, int i, tvp_f *dst) { *dst = self->focus_distance[i]; }
-
-msAPI int   msLightAGetNumColorSamples(ms::LightAnimation *self) { return self ? (int)self->color.size() : 0; }
-msAPI void  msLightAGetColorSample(ms::LightAnimation *self, int i, tvp_f4 *dst) { *dst = self->color[i]; }
-
-msAPI int   msLightAGetNumIntensitySamples(ms::LightAnimation *self) { return self ? (int)self->intensity.size() : 0; }
-msAPI void  msLightAGetIntensitySample(ms::LightAnimation *self, int i, tvp_f *dst) { *dst = self->intensity[i]; }
-
-msAPI int   msLightAGetNumRangeSamples(ms::LightAnimation *self) { return self ? (int)self->range.size() : 0; }
-msAPI void  msLightAGetRangeSample(ms::LightAnimation *self, int i, tvp_f *dst) { *dst = self->range[i]; }
-
-msAPI int   msLightAGetNumSpotAngleSamples(ms::LightAnimation *self) { return self ? (int)self->spot_angle.size() : 0; }
-msAPI void  msLightAGetSpotAngleSample(ms::LightAnimation *self, int i, tvp_f *dst) { *dst = self->spot_angle[i]; }
-
-msAPI int           msMeshAGetNumBlendshapes(ms::MeshAnimation *self) { return (int)self->blendshapes.size(); }
-msAPI const char*   msMeshAGetBlendshapeName(ms::MeshAnimation *self, int bi) { return self->blendshapes[bi]->name.c_str(); }
-msAPI int           msMeshAGetNumBlendshapeSamples(ms::MeshAnimation *self, int bi) { return (int)self->blendshapes[bi]->weight.size(); }
-msAPI void          msMeshAGetBlendshapeSample(ms::MeshAnimation *self, int bi, int i, tvp_f *dst) { *dst = self->blendshapes[bi]->weight[i]; }
-
-msAPI int   msPointsAGetNumTimeSamples(ms::PointsAnimation *self) { return (int)self->time.size(); }
-msAPI void msPointsAGetTimeValue(ms::PointsAnimation *self, int i, tvp_f *dst) { *dst = self->time[i]; }
 #pragma endregion
 
 
@@ -326,7 +316,7 @@ msAPI ms::TextMessage::Type msTextGetType(ms::TextMessage *self)
 
 msAPI ms::QueryMessage::QueryType msQueryGetType(ms::QueryMessage *self)
 {
-    return self->type;
+    return self->query_type;
 }
 msAPI void msQueryFinishRespond(ms::QueryMessage *self)
 {
@@ -477,22 +467,6 @@ msAPI void msCameraSetFarPlane(ms::Camera *self, float v)
 {
     self->far_plane = v;
 }
-msAPI float msCameraGetHorizontalAperture(ms::Camera *self)
-{
-    return self->horizontal_aperture;
-}
-msAPI void msCameraSetHorizontalAperture(ms::Camera *self, float v)
-{
-    self->horizontal_aperture = v;
-}
-msAPI float msCameraGetVerticalAperture(ms::Camera *self)
-{
-    return self->vertical_aperture;
-}
-msAPI void msCameraSetVerticalAperture(ms::Camera *self, float v)
-{
-    self->vertical_aperture = v;
-}
 msAPI float msCameraGetFocalLength(ms::Camera *self)
 {
     return self->focal_length;
@@ -501,13 +475,21 @@ msAPI void msCameraSetFocalLength(ms::Camera *self, float v)
 {
     self->focal_length = v;
 }
-msAPI float msCameraGetFocusDistance(ms::Camera *self)
+msAPI void msCameraGetSensorSize(ms::Camera *self, mu::float2 *v)
 {
-    return self->focus_distance;
+    *v = self->sensor_size;
 }
-msAPI void msCameraSetFocusDistance(ms::Camera *self, float v)
+msAPI void msCameraSetSensorSize(ms::Camera *self, mu::float2 *v)
 {
-    self->focus_distance = v;
+    self->sensor_size = *v;
+}
+msAPI void msCameraGetLensShift(ms::Camera *self, mu::float2 *v)
+{
+    *v = self->lens_shift;
+}
+msAPI void msCameraSetLensShift(ms::Camera *self, mu::float2 *v)
+{
+    self->lens_shift = *v;
 }
 #pragma endregion
 

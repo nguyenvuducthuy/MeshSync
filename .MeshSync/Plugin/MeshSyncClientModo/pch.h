@@ -39,15 +39,16 @@
 #include <lxu_command.hpp>
 #include <lxu_package.hpp>
 #include <lxu_prefvalue.hpp>
+#include <lxu_log.hpp>
 #include <lxw_anim.hpp>
 #include <lxw_customview.hpp>
 #ifdef _WIN32
     #pragma warning(pop)
 #endif
 
+
 #include "MeshSync/MeshSync.h"
 #include "MeshSync/MeshSyncUtils.h"
-
 #ifdef GetObject
     #undef GetObject
 #endif

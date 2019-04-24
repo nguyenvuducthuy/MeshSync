@@ -5,43 +5,50 @@
 
 #define msmaxAPI extern "C" __declspec(dllexport)
 
+struct msmaxSettings
+{
+    ms::ClientSettings client_settings;
 
-class MeshSyncClient3dsMax
+    int timeout_ms = 5000;
+    float scale_factor = 1.0f;
+    bool auto_sync = false;
+    bool sync_meshes = true;
+    bool sync_normals = true;
+    bool sync_uvs = true;
+    bool sync_colors = true;
+    bool flip_faces = true;
+    bool make_double_sided = false;
+    bool bake_modifiers = false;
+    bool convert_to_mesh = true;
+    bool sync_bones = true;
+    bool sync_blendshapes = true;
+    bool sync_cameras = true;
+    bool sync_lights = true;
+    bool sync_textures = true;
+
+    float animation_time_scale = 1.0f;
+    float animation_sps = 3.0f;
+    bool keyframe_reduction = true;
+    bool keep_flat_curves = false;
+
+    bool multithreaded = true;
+
+    // import settings
+    bool bake_skin = false;
+    bool bake_cloth = false;
+};
+
+class msmaxContext
 {
 public:
-    struct Settings
+    enum class SendTarget : int
     {
-        ms::ClientSettings client_settings;
-
-        int timeout_ms = 5000;
-        float scale_factor = 1.0f;
-        bool auto_sync = false;
-        bool sync_meshes = true;
-        bool sync_normals = true;
-        bool sync_uvs = true;
-        bool sync_colors = true;
-        bool make_double_sided = false;
-        bool bake_modifiers = false;
-        bool convert_to_mesh = true;
-        bool sync_bones = true;
-        bool sync_blendshapes = true;
-        bool sync_cameras = true;
-        bool sync_lights = true;
-        bool sync_textures = true;
-
-        float animation_time_scale = 1.0f;
-        float animation_sps = 2.0f;
-        bool keyframe_reduction = true;
-        bool keep_flat_curves = false;
-
-        bool multithreaded = true;
-
-        // import settings
-        bool bake_skin = false;
-        bool bake_cloth = false;
+        Objects,
+        Materials,
+        Animations,
+        Everything,
     };
-
-    enum class SendScope
+    enum class SendScope : int
     {
         None,
         All,
@@ -49,11 +56,11 @@ public:
         Selected,
     };
 
-    static MeshSyncClient3dsMax& getInstance();
+    static msmaxContext& getInstance();
 
-    MeshSyncClient3dsMax();
-    ~MeshSyncClient3dsMax();
-    Settings& getSettings();
+    msmaxContext();
+    ~msmaxContext();
+    msmaxSettings& getSettings();
 
     void onStartup();
     void onShutdown();
@@ -68,8 +75,14 @@ public:
     void onGeometryUpdated(INode *n);
     void onRepaint();
 
+    void logInfo(const char *format, ...);
+    bool isServerAvailable();
+    const std::string& getErrorMessage();
+
+    void wait();
     void update();
-    bool sendScene(SendScope scope, bool force_all);
+    bool sendObjects(SendScope scope, bool dirty_all);
+    bool sendMaterials(bool dirty_all);
     bool sendAnimations(SendScope scope);
 
     bool recvScene();
@@ -104,13 +117,13 @@ private:
 
     struct AnimationRecord : public mu::noncopyable
     {
-        using extractor_t = void (MeshSyncClient3dsMax::*)(ms::Animation& dst, INode *n, Object *obj);
+        using extractor_t = void (msmaxContext::*)(ms::TransformAnimation& dst, INode *n, Object *obj);
         extractor_t extractor = nullptr;
         INode *node = nullptr;
         Object *obj = nullptr;
-        ms::AnimationPtr dst = nullptr;
+        ms::TransformAnimationPtr dst;
 
-        void operator()(MeshSyncClient3dsMax *_this);
+        void operator()(msmaxContext *_this);
     };
 
     struct MaterialRecord : public mu::noncopyable
@@ -127,7 +140,7 @@ private:
     int exportTexture(const std::string& path, ms::TextureType type = ms::TextureType::Default);
     void exportMaterials();
 
-    ms::TransformPtr exportObject(INode *node, bool force);
+    ms::TransformPtr exportObject(INode *node, bool parent, bool tip = true);
     template<class T> std::shared_ptr<T> createEntity(TreeNode& n);
     ms::TransformPtr exportTransform(TreeNode& node);
     ms::TransformPtr exportInstance(TreeNode& node, ms::TransformPtr base);
@@ -136,14 +149,14 @@ private:
     ms::MeshPtr exportMesh(TreeNode& node);
     void doExtractMeshData(ms::Mesh& dst, INode *n, Mesh *mesh);
 
-    ms::AnimationPtr exportAnimations(INode *node, bool force);
-    void extractTransformAnimation(ms::Animation& dst, INode *n, Object *obj);
-    void extractCameraAnimation(ms::Animation& dst, INode *n, Object *obj);
-    void extractLightAnimation(ms::Animation& dst, INode *n, Object *obj);
-    void extractMeshAnimation(ms::Animation& dst, INode *n, Object *obj);
+    bool exportAnimations(INode *node, bool force);
+    void extractTransformAnimation(ms::TransformAnimation& dst, INode *n, Object *obj);
+    void extractCameraAnimation(ms::TransformAnimation& dst, INode *n, Object *obj);
+    void extractLightAnimation(ms::TransformAnimation& dst, INode *n, Object *obj);
+    void extractMeshAnimation(ms::TransformAnimation& dst, INode *n, Object *obj);
 
 private:
-    Settings m_settings;
+    msmaxSettings m_settings;
     ISceneEventManager::CallbackKey m_cbkey = 0;
 
     std::map<INode*, TreeNode> m_node_records;
@@ -168,5 +181,6 @@ private:
     ms::AsyncSceneSender m_sender;
 };
 
-#define msmaxInstance() MeshSyncClient3dsMax::getInstance()
-
+#define msmaxGetContext() msmaxContext::getInstance()
+#define msmaxGetSettings() msmaxGetContext().getSettings()
+bool msmaxExport(msmaxContext::SendTarget target, msmaxContext::SendScope scope);

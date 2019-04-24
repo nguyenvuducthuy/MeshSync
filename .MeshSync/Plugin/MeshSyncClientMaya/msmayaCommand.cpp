@@ -1,10 +1,10 @@
 #define _MApiVersion
 #include "pch.h"
-#include "MeshSyncClientMaya.h"
-#include "msmayaCommands.h"
+#include "msmayaContext.h"
+#include "msmayaCommand.h"
 
 
-template<class T> void get_arg(T& dst, const char *name, MArgParser& args);
+template<class T> static void get_arg(T& dst, const char *name, MArgParser& args);
 
 template<> void get_arg(std::string& dst, const char *name, MArgParser& args)
 {
@@ -42,7 +42,7 @@ template<> void get_arg(float& dst, const char *name, MArgParser& args)
 }
 
 
-template<class T> void to_MString(MString& dst, const T& value);
+template<class T> static void to_MString(MString& dst, const T& value);
 
 template<> void to_MString(MString& dst, const std::string& value)
 {
@@ -65,6 +65,65 @@ template<> void to_MString(MString& dst, const float& value)
     dst += value;
 }
 
+template<class T> static void set_result(const T& value);
+
+template<> void set_result(const std::string& value)
+{
+    MPxCommand::setResult(value.c_str());
+}
+template<> void set_result(const bool& value)
+{
+    MPxCommand::setResult(value);
+}
+template<> void set_result(const int& value)
+{
+    MPxCommand::setResult(value);
+}
+template<> void set_result(const uint16_t& value)
+{
+    MPxCommand::setResult(value);
+}
+template<> void set_result(const float& value)
+{
+    MPxCommand::setResult(value);
+}
+
+
+void* CmdServerStatus::create()
+{
+    return new CmdServerStatus();
+}
+
+const char* CmdServerStatus::name()
+{
+    return "UnityMeshSync_ServerStatus";
+}
+
+MSyntax CmdServerStatus::createSyntax()
+{
+    MSyntax syntax;
+    syntax.enableQuery(true);
+    syntax.enableEdit(false);
+    syntax.addFlag("-ia", "-isAvailable", MSyntax::kBoolean);
+    syntax.addFlag("-em", "-errorMessage", MSyntax::kString);
+    return syntax;
+}
+
+MStatus CmdServerStatus::doIt(const MArgList& args_)
+{
+    MStatus status;
+    MArgParser args(syntax(), args_, &status);
+    if (!args.isQuery())
+        return MStatus::kFailure;
+
+    auto& ctx = msmayaGetContext();
+    if (args.isFlagSet("isAvailable"))
+        set_result(ctx.isServerAvailable());
+    else if (args.isFlagSet("errorMessage"))
+        set_result(std::string("MeshSync: ") + ctx.getErrorMessage() + "\n");
+    return MStatus::kSuccess;
+}
+
 
 void* CmdSettings::create()
 {
@@ -82,7 +141,8 @@ MSyntax CmdSettings::createSyntax()
     MSyntax syntax;
     syntax.enableQuery(true);
     syntax.enableEdit(false);
-    syntax.addFlag("-v", "-version", MSyntax::kString);
+    syntax.addFlag("-plv", "-pluginVersion", MSyntax::kString);
+    syntax.addFlag("-prv", "-protocolVersion", MSyntax::kString);
     syntax.addFlag("-a", "-address", MSyntax::kString);
     syntax.addFlag("-p", "-port", MSyntax::kLong);
     syntax.addFlag("-sf", "-scaleFactor", MSyntax::kDouble);
@@ -107,7 +167,6 @@ MSyntax CmdSettings::createSyntax()
     syntax.addFlag("-rn", "-removeNamespace", MSyntax::kBoolean);
     syntax.addFlag("-mt", "-multithreaded", MSyntax::kBoolean);
     syntax.addFlag("-fct", "-fbxCompatibleTransform", MSyntax::kBoolean);
-
     return syntax;
 }
 
@@ -115,23 +174,26 @@ MStatus CmdSettings::doIt(const MArgList& args_)
 {
     MStatus status;
     MArgParser args(syntax(), args_, &status);
-    auto& settings = MeshSyncClientMaya::getInstance().m_settings;
+    auto& settings = msmayaGetSettings();
 
-    MString result;
-
-    if (args.isFlagSet("version")) {
-        if (args.isQuery()) to_MString(result, std::string(msReleaseDateStr));
+    if (args.isFlagSet("pluginVersion")) {
+        if (args.isQuery())
+            set_result(std::string(msPluginVersionStr));
+    }
+    else if (args.isFlagSet("protocolVersion")) {
+        if (args.isQuery())
+            set_result(std::to_string(msProtocolVersion));
     }
 
 #define Handle(Name, Value, Sync)\
     if (args.isFlagSet(Name)) {\
         if(args.isQuery()) {\
-            to_MString(result, Value);\
+            set_result(Value);\
         }\
         else {\
             get_arg(Value, Name, args);\
             if (settings.auto_sync && Sync)\
-                MeshSyncClientMaya::getInstance().sendScene(MeshSyncClientMaya::SendScope::All, false);\
+                msmayaGetContext().sendObjects(msmayaContext::SendScope::All, false);\
         }\
     }
 
@@ -161,7 +223,6 @@ MStatus CmdSettings::doIt(const MArgList& args_)
     Handle("fbxCompatibleTransform", settings.fbx_compatible_transform, true);
 #undef Handle
 
-    MPxCommand::setResult(result);
     return MStatus::kSuccess;
 }
 
@@ -182,7 +243,6 @@ MSyntax CmdExport::createSyntax()
     syntax.enableEdit(false);
     syntax.addFlag("-s", "-scope", MSyntax::kString);
     syntax.addFlag("-t", "-target", MSyntax::kString);
-    syntax.addFlag("-fa", "-dirtyAll", MSyntax::kBoolean);
     return syntax;
 }
 
@@ -190,38 +250,61 @@ MStatus CmdExport::doIt(const MArgList& args_)
 {
     MStatus status;
     MArgParser args(syntax(), args_, &status);
-    auto& instance = MeshSyncClientMaya::getInstance();
 
-    bool dirty_all = true;
-    bool animations = false;
-    auto scope = MeshSyncClientMaya::SendScope::All;
+    auto target = msmayaContext::SendTarget::Objects;
+    auto scope = msmayaContext::SendScope::All;
 
+    // parse args
     if (args.isFlagSet("target")) {
         std::string t;
         get_arg(t, "target", args);
-        if (t == "animations")
-            animations = true;
+        if (t == "objects")
+            target = msmayaContext::SendTarget::Objects;
+        else if (t == "materials")
+            target = msmayaContext::SendTarget::Materials;
+        else if (t == "animations")
+            target = msmayaContext::SendTarget::Animations;
+        else if (t == "everything")
+            target = msmayaContext::SendTarget::Everything;
     }
     if (args.isFlagSet("scope")) {
         std::string s;
         get_arg(s, "scope", args);
-        if (s == "selection") {
-            scope = MeshSyncClientMaya::SendScope::Selected;
-            dirty_all = false;
-        }
-        else if (s == "updated") {
-            scope = MeshSyncClientMaya::SendScope::Updated;
-            dirty_all = false;
-        }
-    }
-    if (args.isFlagSet("dirtyAll")) {
-        get_arg(dirty_all, "dirtyAll", args);
+        if (s == "all")
+            scope = msmayaContext::SendScope::All;
+        else if (s == "selection")
+            scope = msmayaContext::SendScope::Selected;
+        else if (s == "updated")
+            scope = msmayaContext::SendScope::Updated;
     }
 
-    if (animations)
-        MeshSyncClientMaya::getInstance().sendAnimations(scope);
-    else
-        MeshSyncClientMaya::getInstance().sendScene(scope, dirty_all);
+    // do send
+    auto& inst = msmayaGetContext();
+    if (!inst.isServerAvailable()) {
+        inst.logError("MeshSync: Server not available. %s", inst.getErrorMessage().c_str());
+        return MStatus::kFailure;
+    }
+
+    if (target == msmayaContext::SendTarget::Objects) {
+        inst.wait();
+        inst.sendObjects(scope, true);
+    }
+    else if (target == msmayaContext::SendTarget::Materials) {
+        inst.wait();
+        inst.sendMaterials(true);
+    }
+    else if (target == msmayaContext::SendTarget::Animations) {
+        inst.wait();
+        inst.sendAnimations(scope);
+    }
+    else if (target == msmayaContext::SendTarget::Everything) {
+        inst.wait();
+        inst.sendMaterials(true);
+        inst.wait();
+        inst.sendObjects(scope, true);
+        inst.wait();
+        inst.sendAnimations(scope);
+    }
     return MStatus::kSuccess;
 }
 
@@ -245,6 +328,6 @@ MSyntax CmdImport::createSyntax()
 
 MStatus CmdImport::doIt(const MArgList&)
 {
-    MeshSyncClientMaya::getInstance().recvScene();
+    msmayaGetContext().recvObjects();
     return MStatus::kSuccess;
 }

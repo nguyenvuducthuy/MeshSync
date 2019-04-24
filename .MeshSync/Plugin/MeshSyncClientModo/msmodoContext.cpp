@@ -16,62 +16,6 @@ void msmodoContext::TreeNode::doExtractAnimation(msmodoContext *self)
         (self->*anim_extractor)(*this);
 }
 
-// * run in parallel *
-void msmodoContext::TreeNode::resolveMesh(msmodoContext *self)
-{
-    if (!dst_obj || dst_obj->getType() != ms::Entity::Type::Mesh)
-        return;
-
-    if (!material_names.empty()) {
-        auto& materials = self->m_materials;
-        auto& dst = static_cast<ms::Mesh&>(*dst_obj);
-        int num_faces = (int)dst.counts.size();
-
-        // material names -> material ids
-        dst.material_ids.resize_discard(num_faces);
-        for (int fi = 0; fi < num_faces; ++fi) {
-            auto mname = material_names[fi];
-            int mid = -1;
-            auto it = std::lower_bound(materials.begin(), materials.end(), mname,
-                [](const ms::MaterialPtr& mp, const char *name) { return std::strcmp(mp->name.c_str(), name) < 0; });
-            if (it != materials.end() && (*it)->name == mname)
-                mid = (*it)->id;
-            dst.material_ids[fi] = mid;
-        }
-    }
-    if (!face_types.empty()) {
-        // exclude line objects for now
-        bool all_curves = true;
-        for (auto t : face_types) {
-            if (t != LXiPTYP_CURVE && t != LXiPTYP_BEZIER && t != LXiPTYP_LINE && t != LXiPTYP_BSPLINE) {
-                all_curves = false;
-                break;
-            }
-        }
-        if (all_curves) {
-            self->m_entity_manager.eraseThreadSafe(dst_obj);
-            return;
-        }
-    }
-}
-
-// * run in parallel *
-void msmodoContext::TreeNode::resolveReplicas(msmodoContext *self)
-{
-    if (replicas.empty() && prev_replicas.empty())
-        return;
-
-    // erase from entity manager if the replica no longer exists
-    std::sort(replicas.begin(), replicas.end(),
-        [](auto& a, auto& b) { return a->path < b->path; });
-    for (auto& p : prev_replicas) {
-        auto it = std::lower_bound(replicas.begin(), replicas.end(), p, [](auto& r, auto& p) { return r->path < p->path; });
-        if (it == replicas.end() || (*it)->path != p->path)
-            self->m_entity_manager.eraseThreadSafe(p);
-    }
-
-    prev_replicas = replicas;
-}
 
 void msmodoContext::TreeNode::eraseFromEntityManager(msmodoContext *self)
 {
@@ -84,11 +28,20 @@ void msmodoContext::TreeNode::eraseFromEntityManager(msmodoContext *self)
 
 
 
+static std::unique_ptr<msmodoContext> g_context;
+
 msmodoContext& msmodoContext::getInstance()
 {
-    static msmodoContext s_instance;
-    return s_instance;
+    if (!g_context)
+        g_context.reset(new msmodoContext());
+    return *g_context;
 }
+
+void msmodoContext::finalizeInstance()
+{
+    g_context.reset();
+}
+
 
 msmodoContext::msmodoContext()
 {
@@ -104,6 +57,20 @@ msmodoSettings& msmodoContext::getSettings()
     return m_settings;
 }
 
+
+bool msmodoContext::isServerAvailable()
+{
+    prepare();
+    m_sender.client_settings = m_settings.client_settings;
+    return m_sender.isServerAvaileble();
+}
+
+const std::string& msmodoContext::getErrorMessage()
+{
+    return m_sender.getErrorMessage();
+}
+
+
 void msmodoContext::wait()
 {
     m_sender.wait();
@@ -112,7 +79,7 @@ void msmodoContext::wait()
 void msmodoContext::update()
 {
     if (m_pending_scope != SendScope::None) {
-        sendScene(m_pending_scope, false);
+        sendObjects(m_pending_scope, false);
     }
 }
 
@@ -160,7 +127,7 @@ void msmodoContext::onTreeRestructure()
 void msmodoContext::onTimeChange()
 {
     if (m_settings.auto_sync)
-        sendScene(SendScope::All, false);
+        sendObjects(SendScope::All, false);
 }
 
 void msmodoContext::onIdle()
@@ -180,49 +147,51 @@ void msmodoContext::extractTransformData(TreeNode& n, mu::float3& pos, mu::quatf
     pos = extract_position(mat);
     rot = extract_rotation(mat);
     if (n.item.IsA(tCamera) || n.item.IsA(tLight)) {
-        rot = mu::flipY(rot);
+        rot = mu::flip_y(rot);
         if (n.item.IsA(tLight))
-            rot *= mu::rotateZ(180.0f * mu::Deg2Rad);
+            rot *= mu::rotate_z(180.0f * mu::DegToRad);
     }
     scale = extract_scale(mat);
     vis = loc.Visible(m_ch_read) == LXe_TRUE;
 }
 
 void msmodoContext::extractCameraData(TreeNode& n, bool& ortho, float& near_plane, float& far_plane, float& fov,
-    float& horizontal_aperture, float& vertical_aperture, float& focal_length, float& focus_distance)
+    float& focal_length, mu::float2& sensor_size, mu::float2& lens_shift)
 {
-    static uint32_t ch_proj_type, ch_res_x, ch_res_y, ch_aperture_x, ch_aperture_y, ch_focal_len, ch_focus_dist, ch_clip_dist;
+    static uint32_t ch_proj_type, ch_res_x, ch_res_y, ch_clip_dist, ch_focal_len, ch_aperture_x, ch_aperture_y, ch_offset_x, ch_offset_y;
     if (ch_proj_type == 0) {
         n.item.ChannelLookup(LXsICHAN_CAMERA_PROJTYPE, &ch_proj_type);
         n.item.ChannelLookup(LXsICHAN_CAMERA_RESX, &ch_res_x);
         n.item.ChannelLookup(LXsICHAN_CAMERA_RESY, &ch_res_y);
+        n.item.ChannelLookup(LXsICHAN_CAMERA_CLIPDIST, &ch_clip_dist);
+        n.item.ChannelLookup(LXsICHAN_CAMERA_FOCALLEN, &ch_focal_len);
         n.item.ChannelLookup(LXsICHAN_CAMERA_APERTUREX, &ch_aperture_x);
         n.item.ChannelLookup(LXsICHAN_CAMERA_APERTUREY, &ch_aperture_y);
-        n.item.ChannelLookup(LXsICHAN_CAMERA_FOCALLEN, &ch_focal_len);
-        n.item.ChannelLookup(LXsICHAN_CAMERA_FOCUSDIST, &ch_focus_dist);
-        n.item.ChannelLookup(LXsICHAN_CAMERA_CLIPDIST, &ch_clip_dist);
+        n.item.ChannelLookup(LXsICHAN_CAMERA_OFFSETX, &ch_offset_x);
+        n.item.ChannelLookup(LXsICHAN_CAMERA_OFFSETY, &ch_offset_y);
     }
 
     int proj, res_x, res_y;
-    double aperture_x, aperture_y, focal_len, focus_dist;
+    double focal_len, aperture_x, aperture_y, offset_x, offset_y;
     m_ch_read.Integer(n.item, ch_proj_type, &proj);
     m_ch_read.Integer(n.item, ch_res_x, &res_x);
     m_ch_read.Integer(n.item, ch_res_y, &res_y);
+    m_ch_read.Double(n.item, ch_focal_len, &focal_len);
     m_ch_read.Double(n.item, ch_aperture_x, &aperture_x);
     m_ch_read.Double(n.item, ch_aperture_y, &aperture_y);
-    m_ch_read.Double(n.item, ch_focal_len, &focal_len);
-    m_ch_read.Double(n.item, ch_focus_dist, &focus_dist);
-
-    horizontal_aperture = (float)aperture_x;
-    vertical_aperture = (float)aperture_y;
-    focal_length = (float)focal_len;
-    focus_distance = (float)focus_dist;
+    m_ch_read.Double(n.item, ch_offset_x, &offset_x);
+    m_ch_read.Double(n.item, ch_offset_y, &offset_y);
 
     ortho = proj == 1;
-    fov = mu::compute_fov(vertical_aperture, focal_length);
-
-    // disable near/far plane
+    fov = mu::compute_fov((float)aperture_y, focal_length);
+    // disable clipping planes
     near_plane = far_plane = 0.0f;
+
+    focal_length = (float)focal_len;
+    sensor_size.x = (float)aperture_x;
+    sensor_size.y = (float)aperture_y;
+    lens_shift.x = (float)offset_x;
+    lens_shift.y = (float)offset_y;
 }
 
 void msmodoContext::extractLightData(TreeNode& n, ms::Light::LightType& type, mu::float4& color, float& intensity, float& range, float& spot_angle)
@@ -247,7 +216,7 @@ void msmodoContext::extractLightData(TreeNode& n, ms::Light::LightType& type, mu
         m_ch_read.Double(n.item, ch_radius, &radius);
         m_ch_read.Double(n.item, ch_cone, &cone);
         range = (float)radius;
-        spot_angle = (float)cone * mu::Rad2Deg;
+        spot_angle = (float)cone * mu::RadToDeg;
     }
     else if (t == tPointLight) {
         type = ms::Light::LightType::Point;
@@ -324,10 +293,11 @@ void msmodoContext::extractReplicaData(
 
 bool msmodoContext::sendMaterials(bool dirty_all)
 {
-    if (dirty_all) {
-        m_material_manager.setAlwaysMarkDirty(dirty_all);
-        m_texture_manager.setAlwaysMarkDirty(dirty_all);
-    }
+    if (!prepare() || m_sender.isSending())
+        return false;
+
+    m_material_manager.setAlwaysMarkDirty(dirty_all);
+    m_texture_manager.setAlwaysMarkDirty(dirty_all);
     exportMaterials();
 
     // send
@@ -335,15 +305,14 @@ bool msmodoContext::sendMaterials(bool dirty_all)
     return true;
 }
 
-bool msmodoContext::sendScene(SendScope scope, bool dirty_all)
+bool msmodoContext::sendObjects(SendScope scope, bool dirty_all)
 {
-    if (m_sender.isSending()) {
+    if (!prepare() || m_sender.isSending()) {
         m_pending_scope = scope;
         return false;
     }
     m_pending_scope = SendScope::None;
 
-    prepare();
     m_entity_manager.setAlwaysMarkDirty(dirty_all);
     m_material_manager.setAlwaysMarkDirty(dirty_all);
     m_texture_manager.setAlwaysMarkDirty(false); // false because too heavy
@@ -360,7 +329,8 @@ bool msmodoContext::sendScene(SendScope scope, bool dirty_all)
     }
 
     // materials
-    exportMaterials();
+    if (m_settings.sync_meshes)
+        exportMaterials();
 
     // entities
     if (scope == SendScope::All) {
@@ -374,11 +344,16 @@ bool msmodoContext::sendScene(SendScope scope, bool dirty_all)
         eachReplicator(do_export);
     }
     else if (scope == SendScope::Updated) {
+        int num_exported = 0;
         for (auto& kvp : m_tree_nodes) {
             auto& n = kvp.second;
-            if (n.dirty)
+            if (n.dirty) {
                 exportObject(n.item, false);
+                ++num_exported;
+            }
         }
+        if (num_exported == 0)
+            return true;
     }
 
     // send
@@ -388,8 +363,8 @@ bool msmodoContext::sendScene(SendScope scope, bool dirty_all)
 
 bool msmodoContext::sendAnimations(SendScope scope)
 {
-    wait();
-    prepare();
+    if (!prepare() || m_sender.isSending())
+        return false;
 
     if (exportAnimations(scope) > 0) {
         kickAsyncSend();
@@ -400,7 +375,7 @@ bool msmodoContext::sendAnimations(SendScope scope)
     }
 }
 
-bool msmodoContext::recvScene()
+bool msmodoContext::recvObjects()
 {
     wait();
 
@@ -418,11 +393,9 @@ bool msmodoContext::recvScene()
 ms::MaterialPtr msmodoContext::exportMaterial(CLxUser_Item obj)
 {
     CLxUser_Item mask;
-    std::string ptagtype;
     std::string ptag;
     for (CLxUser_Item i = GetParent(obj); i; i = GetParent(i)) {
-        m_ch_read.GetString(i, LXsICHAN_MASK_PTYP, ptagtype);
-        if (ptagtype == "Material") {
+        if (i.Type() == tMask) {
             mask = i;
             m_ch_read.GetString(i, LXsICHAN_MASK_PTAG, ptag);
             break;
@@ -511,17 +484,20 @@ ms::TransformPtr msmodoContext::exportObject(CLxUser_Item obj, bool parent, bool
         return n.dst_obj;
     n.item = obj;
 
-    auto name = GetName(obj);
-    auto path = GetPath(obj);
-    if (!n.path.empty() && n.path != path) {
-        // renamed
-        n.eraseFromEntityManager(this);
+    // check rename / re-parent
+    {
+        auto name = GetName(obj);
+        auto path = GetPath(obj);
+        if (!n.path.empty() && n.path != path) {
+            // renamed
+            n.eraseFromEntityManager(this);
+        }
+        if (n.index == 0) {
+            n.index = ++m_entity_index_seed;
+        }
+        n.name = name;
+        n.path = path;
     }
-    if (n.index == 0) {
-        n.index = ++m_entity_index_seed;
-    }
-    n.name = name;
-    n.path = path;
 
     auto handle_parent = [&]() {
         if (parent)
@@ -552,7 +528,7 @@ ms::TransformPtr msmodoContext::exportObject(CLxUser_Item obj, bool parent, bool
         if (m_settings.sync_bones)
             eachBone(obj, [&](CLxUser_Item& bone) { exportObject(bone, true); });
 
-        if (m_settings.sync_meshes) {
+        if (m_settings.sync_meshes || m_settings.sync_blendshapes) {
             handle_parent();
             n.dst_obj = exportMesh(n);
         }
@@ -628,7 +604,7 @@ ms::CameraPtr msmodoContext::exportCamera(TreeNode& n)
 
     extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible);
     extractCameraData(n, dst.is_ortho, dst.near_plane, dst.far_plane, dst.fov,
-        dst.horizontal_aperture, dst.vertical_aperture, dst.focal_length, dst.focus_distance);
+        dst.focal_length, dst.sensor_size, dst.lens_shift);
 
     m_entity_manager.add(n.dst_obj);
     return ret;
@@ -659,6 +635,9 @@ ms::MeshPtr msmodoContext::exportMesh(TreeNode& n)
 
     extractTransformData(n, dst.position, dst.rotation, dst.scale, dst.visible);
 
+    // note: this needs to be done in the main thread because accessing CLxUser_Mesh from worker thread causes a crash.
+    // but some heavy tasks such as resolving materials can be in parallel. (see m_parallel_tasks)
+
     CLxUser_StringTag poly_tag;
     CLxUser_Polygon polygons;
     CLxUser_Point points;
@@ -672,243 +651,260 @@ ms::MeshPtr msmodoContext::exportMesh(TreeNode& n)
     int num_indices = 0;
     int num_points = mesh.NPoints();
 
-    // topology
-    {
-        n.face_types.resize_discard(num_faces);
-        n.material_names.resize_discard(num_faces);
+    if (m_settings.sync_meshes) {
+        // topology
+        {
+            n.face_types.resize_discard(num_faces);
+            n.material_names.resize_discard(num_faces);
 
-        dst.counts.resize_discard(num_faces);
-        dst.indices.reserve_discard(num_faces * 4);
-        for (int fi = 0; fi < num_faces; ++fi) {
-            polygons.SelectByIndex(fi);
-
-            polygons.Type(&n.face_types[fi]);
-
-            const char *material_name;
-            poly_tag.Get(LXi_POLYTAG_MATERIAL, &material_name);
-            n.material_names[fi] = material_name;
-
-            uint32_t count;
-            polygons.VertexCount(&count);
-            dst.counts[fi] = count;
-
-            size_t pos = dst.indices.size();
-            dst.indices.resize(pos + count);
-            for (uint32_t ci = 0; ci < count; ++ci) {
-                LXtPointID pid;
-                polygons.VertexByIndex(ci, &pid);
-                points.Select(pid);
-
-                uint32_t index;
-                points.Index(&index);
-                dst.indices[pos + ci] = index;
-            }
-        }
-        num_indices = (int)dst.indices.size();
-
-        // resolving material ids will be done in kickAsyncSend()
-    }
-
-    //points
-    {
-        dst.points.resize_discard(num_points);
-        for (int pi = 0; pi < num_points; ++pi) {
-            points.SelectByIndex(pi);
-
-            LXtFVector p;
-            points.Pos(p);
-            dst.points[pi] = to_float3(p);
-        }
-    }
-
-    // normals
-    if (m_settings.sync_normals) {
-        auto do_extract_map = [&](const char *name, RawVector<mu::float3>& dst_array) {
-            if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_NORMAL, name)))
-                return;
-
-            dst_array.resize_discard(dst.indices.size());
-            auto *write_ptr = dst_array.data();
-
-            auto mmid = mmap.ID();
-            LXtPointID pid;
-            mu::float3 v;
+            dst.counts.resize_discard(num_faces);
+            dst.indices.reserve_discard(num_faces * 4);
             for (int fi = 0; fi < num_faces; ++fi) {
                 polygons.SelectByIndex(fi);
-                int count = dst.counts[fi];
-                for (int ci = 0; ci < count; ++ci) {
-                    polygons.VertexByIndex(ci, &pid);
-                    if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
-                        dst.clear();
-                        return;
-                    }
-                    *(write_ptr++) = v;
-                }
-            }
-        };
 
-        auto do_extract_poly = [&](RawVector<mu::float3>& dst_array) {
-            dst_array.resize_discard(dst.indices.size());
-            auto *write_ptr = dst_array.data();
+                polygons.Type(&n.face_types[fi]);
 
-            LXtPointID pid;
-            for (int fi = 0; fi < num_faces; ++fi) {
-                polygons.SelectByIndex(fi);
-                auto poly_id = polygons.ID();
+                const char *material_name;
+                poly_tag.Get(LXi_POLYTAG_MATERIAL, &material_name);
+                n.material_names[fi] = material_name;
 
-                int count = dst.counts[fi];
-                for (int ci = 0; ci < count; ++ci) {
+                uint32_t count;
+                polygons.VertexCount(&count);
+                dst.counts[fi] = count;
+
+                size_t pos = dst.indices.size();
+                dst.indices.resize(pos + count);
+                for (uint32_t ci = 0; ci < count; ++ci) {
+                    LXtPointID pid;
                     polygons.VertexByIndex(ci, &pid);
                     points.Select(pid);
 
-                    LXtVector n;
-                    points.Normal(poly_id, n);
-                    *(write_ptr++) = to_float3(n);
+                    uint32_t index;
+                    points.Index(&index);
+                    dst.indices[pos + ci] = index;
                 }
             }
-        };
+            num_indices = (int)dst.indices.size();
 
-        auto map_names = GetMapNames(mmap, LXi_VMAP_NORMAL);
-        if (map_names.size() > 0)
-            do_extract_map(map_names[0], dst.normals);
-        else
-            do_extract_poly(dst.normals);
-    }
+            // resolving material ids will be done in kickAsyncSend()
+        }
 
-    // uv
-    if (m_settings.sync_uvs) {
-        auto do_extract = [&](const char *name, RawVector<mu::float2>& dst_array) {
-            if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_TEXTUREUV, name)))
-                return;
-
-            dst_array.resize_discard(dst.indices.size());
-            auto *write_ptr = dst_array.data();
-
-            auto mmid = mmap.ID();
-            LXtPointID pid;
-            mu::float2 v;
-            for (int fi = 0; fi < num_faces; ++fi) {
-                polygons.SelectByIndex(fi);
-                int count = dst.counts[fi];
-                for (int ci = 0; ci < count; ++ci) {
-                    polygons.VertexByIndex(ci, &pid);
-                    if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
-                        dst.clear();
-                        return;
-                    }
-                    *(write_ptr++) = v;
-                }
-            }
-        };
-
-        auto map_names = GetMapNames(mmap, LXi_VMAP_TEXTUREUV);
-        if (map_names.size() > 0)
-            do_extract(map_names[0], dst.uv0);
-        if (map_names.size() > 1)
-            do_extract(map_names[1], dst.uv1);
-    }
-
-    // vertex color
-    if (m_settings.sync_colors) {
-        auto do_extract = [&](const char *name, RawVector<mu::float4>& dst_array) {
-            if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_RGBA, name)))
-                return;
-
-            dst_array.resize_discard(dst.indices.size());
-            auto *write_ptr = dst_array.data();
-
-            auto mmid = mmap.ID();
-            LXtPointID pid;
-            mu::float4 v;
-            for (int fi = 0; fi < num_faces; ++fi) {
-                polygons.SelectByIndex(fi);
-                int count = dst.counts[fi];
-                for (int ci = 0; ci < count; ++ci) {
-                    polygons.VertexByIndex(ci, &pid);
-                    if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
-                        dst.clear();
-                        return;
-                    }
-                    *(write_ptr++) = v;
-                }
-            }
-        };
-
-        auto map_names = GetMapNames(mmap, LXi_VMAP_RGBA);
-        if (map_names.size() > 0)
-            do_extract(map_names[0], dst.colors);
-    }
-
-    // bone weights
-    if (!m_settings.bake_deformers && m_settings.sync_bones) {
-        auto get_weights = [&](const char *name, RawVector<float>& dst_array) -> bool {
-            if (!name || LXx_FAIL(mmap.SelectByName(LXi_VMAP_WEIGHT, name)))
-                return false;
-
-            dst_array.resize_discard(dst.points.size());
-            auto *write_ptr = dst_array.data();
-
-            auto mmid = mmap.ID();
-            float v;
+        //points
+        {
+            dst.points.resize_discard(num_points);
             for (int pi = 0; pi < num_points; ++pi) {
                 points.SelectByIndex(pi);
-                if (LXx_FAIL(points.MapEvaluate(mmid, &v))) {
-                    dst.clear();
-                    return false;
+
+                LXtFVector p;
+                points.Pos(p);
+                dst.points[pi] = to_float3(p);
+            }
+        }
+
+        // normals
+        if (m_settings.sync_normals) {
+            auto do_extract_map = [&](const char *name, RawVector<mu::float3>& dst_array) {
+                if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_NORMAL, name)))
+                    return;
+
+                dst_array.resize_discard(num_indices);
+                auto *write_ptr = dst_array.data();
+
+                auto mmid = mmap.ID();
+                LXtPointID pid;
+                mu::float3 v;
+                for (int fi = 0; fi < num_faces; ++fi) {
+                    polygons.SelectByIndex(fi);
+                    int count = dst.counts[fi];
+                    for (int ci = 0; ci < count; ++ci) {
+                        polygons.VertexByIndex(ci, &pid);
+                        if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
+                            dst.clear();
+                            return;
+                        }
+                        *(write_ptr++) = v;
+                    }
                 }
-                *(write_ptr++) = v;
+            };
+
+            auto do_extract_poly = [&](RawVector<mu::float3>& dst_array) {
+                dst_array.resize_discard(num_indices);
+                auto *write_ptr = dst_array.data();
+
+                LXtPointID pid;
+                for (int fi = 0; fi < num_faces; ++fi) {
+                    polygons.SelectByIndex(fi);
+                    auto poly_id = polygons.ID();
+
+                    int count = dst.counts[fi];
+                    for (int ci = 0; ci < count; ++ci) {
+                        polygons.VertexByIndex(ci, &pid);
+                        points.Select(pid);
+
+                        LXtVector n;
+                        points.Normal(poly_id, n);
+                        *(write_ptr++) = to_float3(n);
+                    }
+                }
+            };
+
+            auto map_names = GetMapNames(mmap, LXi_VMAP_NORMAL);
+            if (map_names.size() > 0)
+                do_extract_map(map_names[0], dst.normals);
+            else
+                do_extract_poly(dst.normals);
+        }
+
+        // uv
+        if (m_settings.sync_uvs) {
+            auto do_extract = [&](const char *name, RawVector<mu::float2>& dst_array) {
+                if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_TEXTUREUV, name)))
+                    return;
+
+                dst_array.resize_discard(num_indices);
+                auto *write_ptr = dst_array.data();
+
+                auto mmid = mmap.ID();
+                LXtPointID pid;
+                mu::float2 v;
+                for (int fi = 0; fi < num_faces; ++fi) {
+                    polygons.SelectByIndex(fi);
+                    int count = dst.counts[fi];
+                    for (int ci = 0; ci < count; ++ci) {
+                        polygons.VertexByIndex(ci, &pid);
+                        if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
+                            dst.clear();
+                            return;
+                        }
+                        *(write_ptr++) = v;
+                    }
+                }
+            };
+
+            auto map_names = GetMapNames(mmap, LXi_VMAP_TEXTUREUV);
+            if (map_names.size() > 0)
+                do_extract(map_names[0], dst.uv0);
+            if (map_names.size() > 1)
+                do_extract(map_names[1], dst.uv1);
+        }
+
+        // vertex color
+        if (m_settings.sync_colors) {
+            auto do_extract = [&](const char *name, RawVector<mu::float4>& dst_array) {
+                if (LXx_FAIL(mmap.SelectByName(LXi_VMAP_RGBA, name)))
+                    return;
+
+                dst_array.resize_discard(num_indices);
+                auto *write_ptr = dst_array.data();
+
+                auto mmid = mmap.ID();
+                LXtPointID pid;
+                mu::float4 v;
+                for (int fi = 0; fi < num_faces; ++fi) {
+                    polygons.SelectByIndex(fi);
+                    int count = dst.counts[fi];
+                    for (int ci = 0; ci < count; ++ci) {
+                        polygons.VertexByIndex(ci, &pid);
+                        if (LXx_FAIL(polygons.MapEvaluate(mmid, pid, &v[0]))) {
+                            dst.clear();
+                            return;
+                        }
+                        *(write_ptr++) = v;
+                    }
+                }
+            };
+
+            auto map_names = GetMapNames(mmap, LXi_VMAP_RGBA);
+            if (map_names.size() > 0)
+                do_extract(map_names[0], dst.colors);
+        }
+
+        // bone weights
+        if (!m_settings.bake_deformers && m_settings.sync_bones) {
+            auto get_weights = [&](const char *name, RawVector<float>& dst_array) -> bool {
+                if (!name || LXx_FAIL(mmap.SelectByName(LXi_VMAP_WEIGHT, name)))
+                    return false;
+
+                dst_array.resize_discard(num_points);
+                auto *write_ptr = dst_array.data();
+
+                auto mmid = mmap.ID();
+                float v;
+                for (int pi = 0; pi < num_points; ++pi) {
+                    points.SelectByIndex(pi);
+                    if (LXx_FAIL(points.MapEvaluate(mmid, &v))) {
+                        dst.clear();
+                        return false;
+                    }
+                    *(write_ptr++) = v;
+                }
+                return true;
+            };
+
+            eachSkinDeformer(n.item, [&](CLxUser_Item& def) {
+                mdmodoSkinDeformer skin(*this, def);
+
+                auto joint = skin.getEffector();
+                if (!joint || !joint.IsA(tLocator))
+                    return;
+
+                auto dst_bone = ms::BoneData::create();
+                dst_bone->path = GetPath(joint);
+                {
+                    // bindpose
+                    CLxUser_Locator loc(joint);
+                    LXtMatrix4 lxmat;
+                    loc.WorldTransform4(m_ch_read_setup, lxmat);
+                    dst_bone->bindpose = mu::invert(to_float4x4(lxmat));
+                }
+                if (get_weights(skin.getMapName(), dst_bone->weights))
+                    dst.bones.push_back(dst_bone);
+                });
+
+            if (!dst.bones.empty()) {
+                dst.refine_settings.flags.apply_local2world = 1;
+                dst.refine_settings.local2world = dst.toMatrix();
             }
-            return true;
-        };
+        }
 
-        eachSkinDeformer(n.item, [&](CLxUser_Item& def) {
-            mdmodoSkinDeformer skin(*this, def);
+        // morph
+        if (!m_settings.bake_deformers && m_settings.sync_blendshapes) {
+            auto get_delta = [&](const char *name, RawVector<mu::float3>& dst_array) -> bool {
+                if (!name || LXx_FAIL(mmap.SelectByName(LXi_VMAP_MORPH, name)))
+                    return false;
 
-            auto joint = skin.getEffector();
-            if (!joint || !joint.IsA(tLocator))
-                return;
+                dst_array.resize_discard(num_points);
+                auto *write_ptr = dst_array.data();
 
-            auto dst_bone = ms::BoneData::create();
-            dst_bone->path = GetPath(joint);
-            {
-                // bindpose
-                CLxUser_Locator loc(joint);
-                LXtMatrix4 lxmat;
-                loc.WorldTransform4(m_ch_read_setup, lxmat);
-                dst_bone->bindpose = mu::invert(to_float4x4(lxmat));
-            }
-            if (get_weights(skin.getMapName(), dst_bone->weights))
-                dst.bones.push_back(dst_bone);
-        });
+                auto mmid = mmap.ID();
+                mu::float3 v;
+                for (int pi = 0; pi < num_points; ++pi) {
+                    points.SelectByIndex(pi);
+                    if (LXx_FAIL(points.MapEvaluate(mmid, &v[0]))) {
+                        dst.clear();
+                        return false;
+                    }
+                    *(write_ptr++) = v;
+                }
+                return true;
+            };
 
-        if (!dst.bones.empty()) {
-            dst.refine_settings.flags.apply_local2world = 1;
-            dst.refine_settings.local2world = dst.toMatrix();
+            eachMorphDeformer(n.item, [&](CLxUser_Item& def) {
+                mdmodoMorphDeformer morph(*this, def);
+
+                auto dst_bs = ms::BlendShapeData::create();
+                dst_bs->name = GetName(def);
+                dst_bs->weight = morph.getWeight();
+
+                auto dst_bsf = ms::BlendShapeFrameData::create();
+                dst_bs->frames.push_back(dst_bsf);
+                dst_bsf->weight = 100.0f;
+                if (get_delta(morph.getMapName(), dst_bsf->points))
+                    dst.blendshapes.push_back(dst_bs);
+            });
         }
     }
-
-    // morph
-    if (!m_settings.bake_deformers && m_settings.sync_blendshapes) {
-        auto get_delta = [&](const char *name, RawVector<mu::float3>& dst_array) -> bool {
-            if (!name || LXx_FAIL(mmap.SelectByName(LXi_VMAP_MORPH, name)))
-                return false;
-
-            dst_array.resize_discard(dst.points.size());
-            auto *write_ptr = dst_array.data();
-
-            auto mmid = mmap.ID();
-            mu::float3 v;
-            for (int pi = 0; pi < num_points; ++pi) {
-                points.SelectByIndex(pi);
-                if (LXx_FAIL(points.MapEvaluate(mmid, &v[0]))) {
-                    dst.clear();
-                    return false;
-                }
-                *(write_ptr++) = v;
-            }
-            return true;
-        };
-
+    else if (m_settings.sync_blendshapes) {
         eachMorphDeformer(n.item, [&](CLxUser_Item& def) {
             mdmodoMorphDeformer morph(*this, def);
 
@@ -916,18 +912,51 @@ ms::MeshPtr msmodoContext::exportMesh(TreeNode& n)
             dst_bs->name = GetName(def);
             dst_bs->weight = morph.getWeight();
 
-            auto dst_bsf = ms::BlendShapeFrameData::create();
-            dst_bs->frames.push_back(dst_bsf);
-            dst_bsf->weight = 100.0f;
-            if (get_delta(morph.getMapName(), dst_bsf->points))
-                dst.blendshapes.push_back(dst_bs);
+            dst.blendshapes.push_back(dst_bs);
         });
     }
 
     dst.setupFlags();
-    dst.refine_settings.flags.make_double_sided = m_settings.make_double_sided;
-    dst.refine_settings.flags.gen_tangents = 1;
-    dst.refine_settings.flags.swap_faces = 1;
+    if (m_settings.sync_meshes) {
+        dst.refine_settings.flags.make_double_sided = m_settings.make_double_sided;
+        dst.refine_settings.flags.gen_tangents = 1;
+        dst.refine_settings.flags.flip_faces = 1;
+    }
+
+    m_parallel_tasks.push_back([this, &n, &dst](){
+        // resolve materials (name -> id)
+        if (!n.material_names.empty()) {
+            auto& materials = m_materials;
+            int num_faces = (int)dst.counts.size();
+
+            dst.material_ids.resize_discard(num_faces);
+            for (int fi = 0; fi < num_faces; ++fi) {
+                auto mname = n.material_names[fi];
+                int mid = -1;
+                auto it = std::lower_bound(materials.begin(), materials.end(), mname,
+                    [](const ms::MaterialPtr& mp, const char *name) { return std::strcmp(mp->name.c_str(), name) < 0; });
+                if (it != materials.end() && (*it)->name == mname)
+                    mid = (*it)->id;
+                dst.material_ids[fi] = mid;
+            }
+            n.material_names.clear();
+        }
+
+        // exclude line objects
+        if (!n.face_types.empty()) {
+            bool all_curves = true;
+            for (auto t : n.face_types) {
+                if (t != LXiPTYP_CURVE && t != LXiPTYP_BEZIER && t != LXiPTYP_LINE && t != LXiPTYP_BSPLINE) {
+                    all_curves = false;
+                    break;
+                }
+            }
+            if (all_curves) {
+                m_entity_manager.eraseThreadSafe(n.dst_obj);
+            }
+            n.face_types.clear();
+        }
+    });
 
     m_entity_manager.add(n.dst_obj);
     return ret;
@@ -954,6 +983,23 @@ ms::TransformPtr msmodoContext::exportReplicator(TreeNode& n)
         n.replicas.push_back(p);
         m_entity_manager.add(p);
     });
+
+    m_parallel_tasks.push_back([this, &n]() {
+        if (n.replicas.empty() && n.prev_replicas.empty())
+            return;
+
+        // erase from entity manager if the replica no longer exists
+        std::sort(n.replicas.begin(), n.replicas.end(),
+            [](auto& a, auto& b) { return a->path < b->path; });
+        for (auto& p : n.prev_replicas) {
+            auto it = std::lower_bound(n.replicas.begin(), n.replicas.end(), p,
+                [](auto& r, auto& p) { return r->path < p->path; });
+            if (it == n.replicas.end() || (*it)->path != p->path)
+                m_entity_manager.eraseThreadSafe(p);
+        }
+        n.prev_replicas = std::move(n.replicas);
+    });
+
     return ret;
 }
 
@@ -983,7 +1029,7 @@ int msmodoContext::exportAnimations(SendScope scope)
             eachLight(do_export);
         if (m_settings.sync_bones)
             eachMesh([&](CLxUser_Item& obj) { eachBone(obj, do_export); });
-        if (m_settings.sync_meshes)
+        if (m_settings.sync_meshes || m_settings.sync_blendshapes)
             eachMesh(do_export);
         if (m_settings.sync_mesh_instances)
             eachMeshInstance(do_export);
@@ -1056,7 +1102,7 @@ std::shared_ptr<T> msmodoContext::createAnimation(TreeNode& n)
     dst.path = GetPath(n.item);
     n.dst_anim = ret;
     n.anim_extractor = getAnimationExtractor<T>();
-    m_animations.front()->animations.push_back(ret);
+    m_animations.front()->addAnimation(ret);
     return ret;
 }
 
@@ -1113,7 +1159,7 @@ void msmodoContext::extractTransformAnimationData(TreeNode& n)
     dst.translation.push_back({ t, pos });
     dst.rotation.push_back({ t, rot });
     dst.scale.push_back({ t, scale });
-    //dst.visible.push_back({ t, vis });
+    dst.visible.push_back({ t, vis });
 }
 
 void msmodoContext::extractCameraAnimationData(TreeNode& n)
@@ -1123,20 +1169,17 @@ void msmodoContext::extractCameraAnimationData(TreeNode& n)
     auto& dst = (ms::CameraAnimation&)*n.dst_anim;
 
     bool ortho;
-    float near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance;
-    extractCameraData(n, ortho, near_plane, far_plane, fov, horizontal_aperture, vertical_aperture, focal_length, focus_distance);
+    float near_plane, far_plane, fov, focal_length;
+    mu::float2 sensor_size, lens_shift;
+    extractCameraData(n, ortho, near_plane, far_plane, fov, focal_length, sensor_size, lens_shift);
 
     float t = m_anim_time;
     dst.near_plane.push_back({ t, near_plane });
     dst.far_plane.push_back({ t, far_plane });
     dst.fov.push_back({ t, fov });
-
-#if 0
-    dst.horizontal_aperture.push_back({ t, horizontal_aperture });
-    dst.vertical_aperture.push_back({ t, vertical_aperture });
     dst.focal_length.push_back({ t, focal_length });
-    dst.focus_distance.push_back({ t, focus_distance });
-#endif
+    dst.sensor_size.push_back({ t, sensor_size });
+    dst.lens_shift.push_back({ t, lens_shift });
 }
 
 void msmodoContext::extractLightAnimationData(TreeNode& n)
@@ -1180,8 +1223,7 @@ void msmodoContext::extractMeshAnimationData(TreeNode& n)
 
             const char *mapname = morph.getMapName();
             if (mapname && LXx_OK(mmap.SelectByName(LXi_VMAP_MORPH, mapname))) {
-                auto bsa = dst.findOrCreateBlendshapeAnimation(GetName(def));
-                bsa->weight.push_back({ t, morph.getWeight() });
+                dst.getBlendshapeCurve(GetName(def)).push_back({ t, morph.getWeight() });
             }
         });
     }
@@ -1204,7 +1246,7 @@ void msmodoContext::extractReplicatorAnimationData(TreeNode& n)
         if (!dst_ptr) {
             dst_ptr = ms::TransformAnimation::create();
             dst_ptr->path = path;
-            m_animations.front()->animations.push_back(dst_ptr);
+            m_animations.front()->addAnimation(dst_ptr);
         }
         auto& dst = static_cast<ms::TransformAnimation&>(*dst_ptr);
 
@@ -1217,12 +1259,13 @@ void msmodoContext::extractReplicatorAnimationData(TreeNode& n)
 
 void msmodoContext::kickAsyncSend()
 {
-    // resolve
-    ms::parallel_for_each(m_tree_nodes.begin(), m_tree_nodes.end(), [this](auto& kvp) {
-        auto& node = kvp.second;
-        node.resolveMesh(this);
-        node.resolveReplicas(this);
-    });
+    // process parallel tasks
+    if (!m_parallel_tasks.empty()) {
+        mu::parallel_for_each(m_parallel_tasks.begin(), m_parallel_tasks.end(), [](auto& task) {
+            task();
+        });
+        m_parallel_tasks.clear();
+    }
 
     // cleanup
     for (auto& kvp : m_tree_nodes)
@@ -1251,4 +1294,35 @@ void msmodoContext::kickAsyncSend()
         m_animations.clear();
     };
     m_sender.kick();
+}
+
+bool msmodoExport(msmodoContext::SendTarget target, msmodoContext::SendScope scope)
+{
+    auto& ctx = msmodoGetContext();
+    if (!ctx.isServerAvailable()) {
+        ctx.logError("MeshSync: Server not available. %s", ctx.getErrorMessage().c_str());
+        return false;
+    }
+
+    if (target == msmodoContext::SendTarget::Objects) {
+        ctx.wait();
+        ctx.sendObjects(scope, true);
+    }
+    else if (target == msmodoContext::SendTarget::Materials) {
+        ctx.wait();
+        ctx.sendMaterials(true);
+    }
+    else if (target == msmodoContext::SendTarget::Animations) {
+        ctx.wait();
+        ctx.sendAnimations(scope);
+    }
+    else if (target == msmodoContext::SendTarget::Everything) {
+        ctx.wait();
+        ctx.sendMaterials(true);
+        ctx.wait();
+        ctx.sendObjects(scope, true);
+        ctx.wait();
+        ctx.sendAnimations(scope);
+    }
+    return true;
 }
